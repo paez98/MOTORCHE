@@ -765,7 +765,40 @@ class FordAPI(PartsLink24API):
         return response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
-        return response_data
+        items = response_data.get("items", [])
+        output = defaultdict(dict)
+        for item in items:
+
+            url = item.get("url")
+
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            payload = {}
+
+            for p in query_params:
+                if p == "upds" or p == "mode":
+                    continue
+                payload[p] = query_params[p][0]
+
+            response = self.session.get(
+                product_url, headers=self.headers, params=payload
+            )
+
+            if response.status_code == 500:
+                response = self.session.get(
+                    self.producto_url_2, headers=self.headers, params=payload
+                )
+                print(response.url)
+
+            details = response.json().get("details", [])
+            for d in details:
+                name = d.get("caption", "").lower().strip()
+                partno = d.get("partno", "").strip()
+                valid = d.get("valid", False)
+
+                output[name][partno] = valid
+                print(dict(output))
+        return dict(output)
 
 
 class VwAPI(PartsLink24API):
