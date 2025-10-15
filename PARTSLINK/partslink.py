@@ -8,6 +8,8 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from urllib.parse import urlparse, parse_qs
 from typing import Optional
+from bs4 import BeautifulSoup
+
 
 # import re
 
@@ -1904,22 +1906,79 @@ class CitroenApi(PartsLink24API):
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
         print(response_data)
-        url = response_data.get("items", [])[0].get("url")
+        datos_pieza = []
+        items = response_data.get("items", [])
+        for item in items:
+            item_partno = item.get("partnoHtml", "").replace(" ", "")
 
-        parsed_url = urlparse(url)
-        query_params = parse_qs(parsed_url.query)
-        payload = {}
+            partno_exist = any(
+                d.get("numero_pieza") == item_partno for d in datos_pieza
+            )
+            if partno_exist:
+                continue
+            url = item.get("url")
 
-        for p in query_params:
-            payload[p] = query_params[p][0]
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            payload = {}
 
-        headers = self.headers.copy()
-        headers.update({"Authorization": f"Bearer {self.access_token}"})
+            for p in query_params:
+                payload[p] = query_params[p][0]
 
-        response = self.session.get(url=product_url, headers=headers, params=payload)
-        print(response.content)
+            headers = self.headers.copy()
+            headers.update({"Authorization": f"Bearer {self.access_token}"})
 
-        return
+            response_html = self.session.get(
+                url=product_url, headers=headers, params=payload
+            )
+            print(response_html.content)
+            soup = BeautifulSoup(response_html.text, "html.parser")
+            regex_pattern = re.compile(r"^_nav-bom-table\d+$")
+            filas_despiece = soup.find_all("tr", id=regex_pattern)
+
+            print(len(filas_despiece))
+
+            for fila in filas_despiece:
+                # A. Verificar la celda de posición (posno tc-mcell)
+                td_posno = fila.find("td", class_="posno")
+
+                # Extraer el texto y limpiarlo. Si solo contiene &nbsp; o está vacío, resultará en ''
+                if td_posno:
+                    posno_text = td_posno.text.strip()
+
+                    # Si la celda de posición está vacía después de limpiar el espacio (&nbsp;),
+                    # saltar al siguiente registro (fila)
+                    if not posno_text:
+                        continue
+
+                td_pieza = fila.find("td", class_="portnoFormatted")
+                # Denominación
+                td_denominacion = fila.find("td", class_="partName")
+
+                # Extracción y limpieza
+                numero_pieza = (
+                    td_pieza.text.strip().replace("\xa0", " ").replace(" ", "")
+                    if td_pieza
+                    else "N/A"
+                )
+                denominacion = (
+                    td_denominacion.text.strip() if td_denominacion else "N/A"
+                )
+
+                # Acumular los resultados (solo si al menos una pieza o denominación es válida,
+                # aunque el filtro de posno ya debería haber funcionado)
+                if numero_pieza != "N/A" or denominacion != "N/A":
+                    datos_pieza.append(
+                        {
+                            "id": posno_text,
+                            "numero_pieza": numero_pieza,
+                            "denominacion": denominacion,
+                        }
+                    )
+
+        print(datos_pieza)
+
+        return datos_pieza
 
 
 # Error 402
