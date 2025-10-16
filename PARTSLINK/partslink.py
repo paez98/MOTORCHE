@@ -2788,16 +2788,16 @@ def test(vin: str, brand: str, query: str):
     )
 
 
-if __name__ == "__main__":
+ if __name__ == "__main__":
 
-    # if len(sys.argv) != 4:
-    #     print(
-    #         "Error: Se requieren 3 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta'"
-    #     )
-    #     sys.exit(1)
-    # vin = sys.argv[1]
-    # marca = sys.argv[2]
-    # pieza = sys.argv[3]
+    if len(sys.argv) != 4:
+         print(
+             "Error: Se requieren 3 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta'"
+         )
+         sys.exit(1)
+         vin = sys.argv[1]
+         marca = sys.argv[2]
+         pieza = sys.argv[3]
 
     # marca = "smart"
     # vin = "WME4513311K043393"
@@ -2815,9 +2815,9 @@ if __name__ == "__main__":
     #vin = "KNEUP751256716941"
     #pieza = "puerta"
 
-    marca = "peugeot"
-    vin = "VF30U9HD8DS031095"
-    pieza = "puerta"
+    #marca = "peugeot"
+    #vin = "VF30U9HD8DS031095"
+    #pieza = "puerta"
 
     # marca = "citroen"
     # vin = "VF7GJWJYB93233667"
