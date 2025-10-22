@@ -1,4 +1,5 @@
 import requests
+import base64
 import time
 import os
 import re
@@ -270,6 +271,7 @@ BRAND_DATA = {
         "consulta_url": "https://www.partslink24.com/p5vwag/extern/search/vin",
         "producto_url": "https://www.partslink24.com/p5vwag/extern/bom/vin",
         "datos_url": "https://www.partslink24.com/p5vwag/extern/directAccess",
+        "image_url": "https://www.partslink24.com/imageserver/ext/api/images/205837000?",
     },
     "SKODA": {
         "service_name": "skoda_parts",
@@ -428,6 +430,7 @@ class PartsLink24API:
                 self.authorize_url,
                 json=auth_payload,
             )
+            print(response_auth.text)
             response_auth.raise_for_status()
             auth_data = response_auth.json()
 
@@ -446,7 +449,8 @@ class PartsLink24API:
         service_name,
         search_url,
         product_url,
-        data_url: Optional[any] = None,
+        data_url: Optional[str] = None,
+        car: Optional[str] = None,
     ):
 
         if not self.access_token:
@@ -455,6 +459,7 @@ class PartsLink24API:
         # --- Intento 1: Usar la sesión actual ---
         palabra_clave = query.lower().strip()
         response = self._realizar_consulta(vin, query, service_name, search_url)
+        print(response.json())
         if response and response.status_code == 200:
             parsed_response = self.procesar_resultados(
                 response_data=response.json(),
@@ -700,7 +705,14 @@ class FordAPI(PartsLink24API):
         self.data_url_2 = brand_info_2.get("datos_url")
 
     def buscar_pieza(
-        self, vin, query, service_name, search_url, product_url, data_url=None
+        self,
+        vin,
+        query,
+        service_name,
+        search_url,
+        product_url,
+        data_url=None,
+        car: Optional[str] = None,
     ):
         response = self._realizar_consulta(
             vin=vin, service_name=service_name, search_url=search_url, query=query
@@ -913,42 +925,48 @@ class ToyotaAPI(PartsLink24API):
         self.data_url = brand_info.get("datos_url")
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
+        demo = response_data.get("demo", False)
+        if demo:
+            exit
+
         records = response_data.get("data", {}).get("records", [])
         part_list = []
-        counter = 1
+
         for record in records:
-            # Extraer información relevante del record
-            part_number = record["values"]["partnumber"]
-            position = record["values"]["pos"]
-            subgroup_desc = record["values"]["subgroupDescription"]
-            part_desc = record["values"]["partDescription"]
-            illustration = record["recordContext"]["illustration"]
-            bt_page = record["recordContext"]["bt_page"]
+            path = record.get("p5goto", {}).get("ws", [])[0].get("path")
+            parsed_path = urlparse(path)
+            query_params = parse_qs(parsed_path.query)
+            payload = {}
+            for query in query_params:
+                if query == "upds":
+                    continue
+                payload[query] = query_params[query][0]
 
-            dict_list = {
-                "Parte": counter,
-                "part_number": part_number,
-                "position": position,
-                "subgroup_description": subgroup_desc,
-                "part_description": part_desc,
-                "illustration": illustration,
-                "bt_page": bt_page,
-            }
+            self.headers.update({"Authorization": f"Bearer {self.access_token}"})
 
-            part_list.append(dict_list)
+            response_parts = self.session.get(
+                product_url, headers=self.headers, params=payload
+            )
 
-            # Imprimir la información
-            # print("=" * 50)  # Separador visual
-            # print(f"Parte {counter}")
-            # print(f"Part Number: {part_number}")
-            # print(f"Position: {position}")
-            # print(f"Subgroup Description: {subgroup_desc}")
-            # print(f"Part Description: {part_desc}")
-            # print(f"Illustration: {illustration}")
-            # print(f"BT Page: {bt_page}")
-            # print("=" * 50)  # Separador visual
-            # print()
-            counter += 1
+            records_parts = response_parts.json().get("data", {}).get("records", [])
+
+            for part in records_parts:
+                values = part.get("values", {})
+                partno = values.get("partno")
+                name = values.get("description")
+                date = values.get("appliFrom")
+                note = values.get("appliNote")
+                position = values.get("pos")
+
+                part_dict = {
+                    "nombre": name,
+                    "partno": partno,
+                    "fecha": date if date else "N/A",
+                    "nota": note if note else "N/A",
+                    "posición": position if position else "N/A",
+                }
+
+                part_list.append(part_dict)
         print(part_list)
         return {"output": part_list}
 
@@ -1151,6 +1169,7 @@ class OpelApi(PartsLink24API):
         product_url: Optional[str] = None,
         data_url: Optional[str] = None,
         page: Optional[str] = None,
+        car: Optional[str] = None,
     ):
         params = {
             "lang": "es",
@@ -1174,7 +1193,9 @@ class OpelApi(PartsLink24API):
         print(response.url)
 
         # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+        if response.status_code == 200 and "application/json" in response.headers.get(
+            "Content-Type", ""
+        ):
             parsed_response = self.procesar_resultados(
                 response.json(),
                 service_name,
@@ -1185,7 +1206,9 @@ class OpelApi(PartsLink24API):
             return parsed_response
 
         # 401/402 → Refresh → Retry
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             refrescar = self.refresh_access_token(service_name, is_refresh=True)
             if refrescar:
                 self.save_session_state()
@@ -1197,7 +1220,10 @@ class OpelApi(PartsLink24API):
                     headers=headers,
                     params=params,
                 )
-                if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                if (
+                    response.status_code == 200
+                    and "application/json" in response.headers.get("Content-Type", "")
+                ):
                     return self.procesar_resultados(
                         response.json(),
                         service_name,
@@ -1207,7 +1233,9 @@ class OpelApi(PartsLink24API):
                     )
 
         # Re-login completo si sigue fallando
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
             logged = self.login()
@@ -1223,7 +1251,11 @@ class OpelApi(PartsLink24API):
                         headers=headers,
                         params=params,
                     )
-                    if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                    if (
+                        response.status_code == 200
+                        and "application/json"
+                        in response.headers.get("Content-Type", "")
+                    ):
                         return self.procesar_resultados(
                             response.json(),
                             service_name,
@@ -1233,7 +1265,9 @@ class OpelApi(PartsLink24API):
                         )
 
         if response is not None and response.status_code == 402:
-            print("Suscripción requerida para Opel. Verifica permisos de 'opel_parts' en tu cuenta.")
+            print(
+                "Suscripción requerida para Opel. Verifica permisos de 'opel_parts' en tu cuenta."
+            )
         return response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
@@ -1257,30 +1291,37 @@ class OpelApi(PartsLink24API):
 
             # Intento de detalles del producto; algunos endpoints pueden responder HTML
             try:
-                detail_resp = self.session.get(product_url, headers=headers, params=params)
+                detail_resp = self.session.get(
+                    product_url, headers=headers, params=params
+                )
                 details = (
                     detail_resp.json()
                     if detail_resp.status_code == 200
-                    and "application/json" in detail_resp.headers.get("Content-Type", "")
+                    and "application/json"
+                    in detail_resp.headers.get("Content-Type", "")
                     else None
                 )
             except Exception:
                 details = None
 
-            results.append({
-                "caption": item.get("caption"),
-                "partno": item.get("gmPartNo"),
-                "url": item_url,
-                "details": details,
-            })
+            results.append(
+                {
+                    "caption": item.get("caption"),
+                    "partno": item.get("gmPartNo"),
+                    "url": item_url,
+                    "details": details,
+                }
+            )
 
         # Formateo en tabla legible
         def trunc(s, n):
-            s = (s or "")
-            return (s[:n-1] + "…") if len(s) > n else s
+            s = s or ""
+            return (s[: n - 1] + "…") if len(s) > n else s
 
         print("\n" + "=" * 100)
-        print(f"RESULTADOS OPEL — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)")
+        print(
+            f"RESULTADOS OPEL — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+        )
         print("=" * 100)
         header = f"{'PARTNO':<18} {'DESCRIPCIÓN':<40} {'URL':<25}"
         print(header)
@@ -1431,6 +1472,7 @@ class NissanApi(PartsLink24API):
         product_url: Optional[str] = None,
         data_url: Optional[str] = None,
         page: Optional[str] = None,
+        car: Optional[str] = None,
     ):
         params = {
             "lang": "es",
@@ -1452,7 +1494,9 @@ class NissanApi(PartsLink24API):
         )
 
         # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+        if response.status_code == 200 and "application/json" in response.headers.get(
+            "Content-Type", ""
+        ):
             parsed_response = self.procesar_resultados(
                 response.json(),
                 service_name,
@@ -1463,7 +1507,9 @@ class NissanApi(PartsLink24API):
             return parsed_response
 
         # 401/402 → Refresh → Retry
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             refrescar = self.refresh_access_token(service_name, is_refresh=True)
             if refrescar:
                 self.save_session_state()
@@ -1475,7 +1521,10 @@ class NissanApi(PartsLink24API):
                     headers=headers,
                     params=params,
                 )
-                if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                if (
+                    response.status_code == 200
+                    and "application/json" in response.headers.get("Content-Type", "")
+                ):
                     return self.procesar_resultados(
                         response.json(),
                         service_name,
@@ -1485,7 +1534,9 @@ class NissanApi(PartsLink24API):
                     )
 
         # Re-login completo si sigue fallando
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
             logged = self.login()
@@ -1501,7 +1552,11 @@ class NissanApi(PartsLink24API):
                         headers=headers,
                         params=params,
                     )
-                    if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                    if (
+                        response.status_code == 200
+                        and "application/json"
+                        in response.headers.get("Content-Type", "")
+                    ):
                         return self.procesar_resultados(
                             response.json(),
                             service_name,
@@ -1511,7 +1566,9 @@ class NissanApi(PartsLink24API):
                         )
 
         if response is not None and response.status_code == 402:
-            print("Suscripción requerida para Nissan. Verifica permisos de 'nissan_parts' en tu cuenta.")
+            print(
+                "Suscripción requerida para Nissan. Verifica permisos de 'nissan_parts' en tu cuenta."
+            )
         return response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
@@ -1532,31 +1589,38 @@ class NissanApi(PartsLink24API):
                 headers["Authorization"] = f"Bearer {self.access_token}"
 
             try:
-                detail_resp = self.session.get(product_url, headers=headers, params=params)
+                detail_resp = self.session.get(
+                    product_url, headers=headers, params=params
+                )
                 details = (
                     detail_resp.json()
                     if detail_resp.status_code == 200
-                    and "application/json" in detail_resp.headers.get("Content-Type", "")
+                    and "application/json"
+                    in detail_resp.headers.get("Content-Type", "")
                     else None
                 )
             except Exception:
                 details = None
 
-            results.append({
-                "caption": item.get("caption"),
-                "partno": item.get("partno"),
-                "pnc": item.get("pnc"),
-                "url": item_url,
-                "details": details,
-            })
+            results.append(
+                {
+                    "caption": item.get("caption"),
+                    "partno": item.get("partno"),
+                    "pnc": item.get("pnc"),
+                    "url": item_url,
+                    "details": details,
+                }
+            )
 
         # Formateo en tabla legible
         def trunc(s, n):
-            s = (s or "")
-            return (s[:n-1] + "…") if len(s) > n else s
+            s = s or ""
+            return (s[: n - 1] + "…") if len(s) > n else s
 
         print("\n" + "=" * 100)
-        print(f"RESULTADOS NISSAN — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)")
+        print(
+            f"RESULTADOS NISSAN — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+        )
         print("=" * 100)
         header = f"{'PARTNO':<18} {'PNC':<12} {'DESCRIPCIÓN':<40} {'URL':<25}"
         print(header)
@@ -1571,6 +1635,7 @@ class NissanApi(PartsLink24API):
         print("=" * 100)
 
         return results
+
 
 class MercedesApi(PartsLink24API):
     def __init__(self, account, user, password):
@@ -1617,6 +1682,7 @@ class MercedesApi(PartsLink24API):
         search_url,
         product_url,
         data_url: Optional[any] = None,
+        car: Optional[str] = None,
     ):
 
         if not self.access_token:
@@ -1737,7 +1803,16 @@ class RenaultApi(PartsLink24API):
         self.producto_url = brand_info.get("producto_url")
         self.data_url = brand_info.get("datos_url")
 
-    def buscar_pieza(self, vin, query, service_name, search_url, product_url, data_url):
+    def buscar_pieza(
+        self,
+        vin,
+        query,
+        service_name,
+        search_url,
+        product_url,
+        data_url,
+        car: Optional[str] = None,
+    ):
 
         data_car = self.get_car_data(
             vin=vin, service_name=service_name, search_url=data_url
@@ -1888,6 +1963,149 @@ class SeatApi(PartsLink24API):
         self.consulta_url = brand_info.get("consulta_url")
         self.producto_url = brand_info.get("producto_url")
         self.data_url = brand_info.get("datos_url")
+        self.image_url = brand_info.get("image_url")
+
+    def get_image(self, image_url: str, query: str):
+
+        parsed_url = urlparse(image_url)
+        query_params = parse_qs(parsed_url.query)
+
+        payload = {}
+
+        for p in query_params:
+            if p == "_" or p == "upds":
+                continue
+            payload[p] = query_params[p][0]
+
+        headers = self.headers.copy()
+        headers["Authorization"] = f"Bearer {self.access_token}"
+
+        response = self.session.get(url=self.image_url, headers=headers, params=payload)
+
+        image = response.json().get("image")
+        image_data = base64.b64decode(image)
+        file_name = f"{query.replace(' ','_')}.png"
+        with open(file_name, "wb") as img_file:
+            img_file.write(image_data)
+
+        print(image)
+        return image
+
+    def get_car_data(self, vin, service_name, search_url, car):
+        header = self.headers.copy()
+        header["Authorization"] = f"Bearer {self.access_token}"
+        params = {"lang": "es", "q": vin, "serviceName": service_name, "p5v": "1.22.3"}
+
+        response = self.session.get(url=search_url, headers=header, params=params)
+
+        if response.status_code == 200:
+
+            return response.json()
+
+        if response.status_code == 401 or response.status_code == 402:
+            self.refresh_access_token(ALL_SERVICES, is_refresh=True)
+            self.save_session_state()
+            self.load_session_state()
+            header = self.headers.copy()
+            header["Authorization"] = f"Bearer {self.access_token}"
+            response = self.session.get(url=search_url, headers=header, params=params)
+            if response.status_code == 200:
+                return response.json()
+
+        if response.status_code == 401 or response.status_code == 402:
+            if os.path.exists(self.session_file):
+                os.remove(self.session_file)
+            logged = self.login()
+            if logged:
+                self.save_session_state()
+                self.load_session_state()
+                self.refresh_access_token(ALL_SERVICES, is_refresh=False)
+                self.save_session_state()
+                self.load_session_state()
+
+                header = self.headers.copy()
+                header["Authorization"] = f"Bearer {self.access_token}"
+                response = self.session.get(
+                    url=search_url, headers=header, params=params
+                )
+                if response.status_code == 200:
+                    return response.json()
+        return response
+
+    def buscar_pieza(
+        self, vin, query, service_name, search_url, product_url, data_url=None, car=None
+    ):
+
+        response_car = self.get_car_data(vin, service_name, data_url, car)
+        crumbs = response_car.get("crumbs", [])
+        if crumbs:
+            data = response_car.get("data", {})
+            narrow = data.get("narrowDownOptions", [])
+            for n in narrow:
+                payload = {}
+                description = n.get("description", "")
+
+                if car.capitalize() in description:
+                    path = n.get("link", {}).get("path", "")
+                    parsed_url = urlparse(path)
+                    query_params = parse_qs(parsed_url.query)
+
+                    for p in query_params:
+                        if p == "_" or p == "upds":
+                            continue
+                        payload[p] = query_params[p][0]
+
+                    headers = self.headers.copy()
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+
+                    response_car = self.session.get(
+                        url=data_url, headers=headers, params=payload
+                    )
+
+                    vehicle_context = response_car.json().get("vehicleContext", {})
+                    model_code = vehicle_context.get("modelCode")
+                    model_id = vehicle_context.get("modelId")
+                    request_params = {
+                        "lang": "es",
+                        "modelCode": model_code,
+                        "modelId": model_id,
+                        "serviceName": service_name,
+                        "vin": vin,
+                        "q": query,
+                    }
+                    response = self.session.get(
+                        search_url, headers=headers, params=request_params
+                    )
+                    print(response.json())
+                    parsed_response = self.procesar_resultados(
+                        response.json(), service_name, vin, product_url, query
+                    )
+
+                    return parsed_response
+
+                continue
+
+        print(response_car)
+
+        headers = self.headers.copy()
+        headers["Authorization"] = f"Bearer {self.access_token}"
+
+        params = {
+            "lang": "es",
+            "serviceName": service_name,
+            "vin": vin,
+            "q": query,
+            # "_": str(int(time.time() * 1000)),
+        }
+        response = self.session.get(search_url, headers=headers, params=params)
+
+        print(response.json())
+
+        parsed_response = self.procesar_resultados(
+            response.json(), service_name, vin, product_url, query
+        )
+
+        return parsed_response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
         """
@@ -1908,19 +2126,12 @@ class SeatApi(PartsLink24API):
 
                 parsed_url = urlparse(path_info)
                 query_params = parse_qs(parsed_url.query)
-                illustration_id = query_params.get("illustrationId", [None])[0]
-                maingroup = query_params.get("maingroup", [None])[0]
+                params_producto = {}
+                for p in query_params:
+                    if p == "_" or p == "upds":
+                        continue
+                    params_producto[p] = query_params[p][0]
 
-                if not all([bt_page, illustration_id, maingroup]):
-                    continue
-
-                params_producto = {
-                    "illustrationId": illustration_id,
-                    "lang": "es",
-                    "maingroup": maingroup,
-                    "serviceName": service_name,
-                    "vin": vin,
-                }
                 consulta_headers = self.headers.copy()
                 consulta_headers.update(
                     {"Authorization": f"Bearer {self.access_token}"}
@@ -1929,7 +2140,15 @@ class SeatApi(PartsLink24API):
                 consulta_producto = self.session.get(
                     product_url, headers=consulta_headers, params=params_producto
                 )
-                print(consulta_producto.url)
+                print(consulta_producto.json())
+                image_url = (
+                    consulta_producto.json()
+                    .get("data", {})
+                    .get("images", [])[0]
+                    .get("uri")
+                )
+
+                base_image = self.get_image(image_url, query)
 
                 if consulta_producto.status_code == 200:
                     response_data_product = consulta_producto.json()
@@ -1971,13 +2190,12 @@ class SeatApi(PartsLink24API):
                             "unavailable": unavailable,
                         }
                         productos_data[ref_normalizado] = datos_pieza
+                print(productos_data)
+                return productos_data
 
             except Exception as e:
                 print(f"Ocurrió un error procesando un registro de categoría: {e}")
-                continue
-
-        print(productos_data)
-        return productos_data
+                return None
 
 
 class AudiApi(PartsLink24API):
@@ -2091,7 +2309,14 @@ class CitroenApi(PartsLink24API):
         self.data_url = brand_info.get("datos_url")
 
     def buscar_pieza(
-        self, vin, query, service_name, search_url, product_url, data_url=None
+        self,
+        vin,
+        query,
+        service_name,
+        search_url,
+        product_url,
+        data_url: Optional[str] = None,
+        car: Optional[str] = None,
     ):
 
         palabra_clave = query.lower().strip()
@@ -2237,7 +2462,7 @@ class CitroenApi(PartsLink24API):
         return datos_pieza
 
 
-# Error 402 
+# Error 402
 class PeugeotApi(PartsLink24API):
     def __init__(self, account, user, password):
         super().__init__(account, user, password)
@@ -2256,6 +2481,7 @@ class PeugeotApi(PartsLink24API):
         product_url: Optional[str] = None,
         data_url: Optional[str] = None,
         page: Optional[str] = None,
+        car: Optional[str] = None,
     ):
         params = {
             "lang": "es",
@@ -2277,7 +2503,9 @@ class PeugeotApi(PartsLink24API):
         )
 
         # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+        if response.status_code == 200 and "application/json" in response.headers.get(
+            "Content-Type", ""
+        ):
             parsed_response = self.procesar_resultados(
                 response.json(),
                 service_name,
@@ -2288,7 +2516,9 @@ class PeugeotApi(PartsLink24API):
             return parsed_response
 
         # 401/402 → Refresh → Retry
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             refrescar = self.refresh_access_token(service_name, is_refresh=True)
             if refrescar:
                 self.save_session_state()
@@ -2300,7 +2530,10 @@ class PeugeotApi(PartsLink24API):
                     headers=headers,
                     params=params,
                 )
-                if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                if (
+                    response.status_code == 200
+                    and "application/json" in response.headers.get("Content-Type", "")
+                ):
                     return self.procesar_resultados(
                         response.json(),
                         service_name,
@@ -2310,7 +2543,9 @@ class PeugeotApi(PartsLink24API):
                     )
 
         # Re-login completo si sigue fallando
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
             logged = self.login()
@@ -2326,7 +2561,11 @@ class PeugeotApi(PartsLink24API):
                         headers=headers,
                         params=params,
                     )
-                    if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                    if (
+                        response.status_code == 200
+                        and "application/json"
+                        in response.headers.get("Content-Type", "")
+                    ):
                         return self.procesar_resultados(
                             response.json(),
                             service_name,
@@ -2336,7 +2575,9 @@ class PeugeotApi(PartsLink24API):
                         )
 
         if response is not None and response.status_code == 402:
-            print("Suscripción requerida para Peugeot. Verifica permisos de 'peugeot_parts' en tu cuenta.")
+            print(
+                "Suscripción requerida para Peugeot. Verifica permisos de 'peugeot_parts' en tu cuenta."
+            )
         return response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
@@ -2357,29 +2598,36 @@ class PeugeotApi(PartsLink24API):
                 headers["Authorization"] = f"Bearer {self.access_token}"
 
             try:
-                detail_resp = self.session.get(product_url, headers=headers, params=params)
+                detail_resp = self.session.get(
+                    product_url, headers=headers, params=params
+                )
                 details = (
                     detail_resp.json()
                     if detail_resp.status_code == 200
-                    and "application/json" in detail_resp.headers.get("Content-Type", "")
+                    and "application/json"
+                    in detail_resp.headers.get("Content-Type", "")
                     else None
                 )
             except Exception:
                 details = None
 
-            results.append({
-                "caption": item.get("captionHtml"),
-                "partno": item.get("partno"),
-                "url": item_url,
-            })
+            results.append(
+                {
+                    "caption": item.get("captionHtml"),
+                    "partno": item.get("partno"),
+                    "url": item_url,
+                }
+            )
 
         # Formateo en tabla legible
         def trunc(s, n):
-            s = (s or "")
-            return (s[:n-1] + "…") if len(s) > n else s
+            s = s or ""
+            return (s[: n - 1] + "…") if len(s) > n else s
 
         print("\n" + "=" * 100)
-        print(f"RESULTADOS PEUGEOT — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)")
+        print(
+            f"RESULTADOS PEUGEOT — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+        )
         print("=" * 100)
         header = f"{'PARTNO':<18} {'DESCRIPCIÓN':<40} {'URL':<25}"
         print(header)
@@ -2413,6 +2661,7 @@ class HyundaiApi(PartsLink24API):
         product_url: Optional[str] = None,
         data_url: Optional[str] = None,
         page: Optional[str] = None,
+        car: Optional[str] = None,
     ):
         params = {
             "lang": "es",
@@ -2434,7 +2683,9 @@ class HyundaiApi(PartsLink24API):
         )
 
         # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+        if response.status_code == 200 and "application/json" in response.headers.get(
+            "Content-Type", ""
+        ):
             parsed_response = self.procesar_resultados(
                 response.json(),
                 service_name,
@@ -2445,7 +2696,9 @@ class HyundaiApi(PartsLink24API):
             return parsed_response
 
         # 401/402 → Refresh → Retry
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             refrescar = self.refresh_access_token(service_name, is_refresh=True)
             if refrescar:
                 self.save_session_state()
@@ -2457,7 +2710,10 @@ class HyundaiApi(PartsLink24API):
                     headers=headers,
                     params=params,
                 )
-                if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                if (
+                    response.status_code == 200
+                    and "application/json" in response.headers.get("Content-Type", "")
+                ):
                     return self.procesar_resultados(
                         response.json(),
                         service_name,
@@ -2467,7 +2723,9 @@ class HyundaiApi(PartsLink24API):
                     )
 
         # Re-login completo si sigue fallando
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
             logged = self.login()
@@ -2483,7 +2741,11 @@ class HyundaiApi(PartsLink24API):
                         headers=headers,
                         params=params,
                     )
-                    if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                    if (
+                        response.status_code == 200
+                        and "application/json"
+                        in response.headers.get("Content-Type", "")
+                    ):
                         return self.procesar_resultados(
                             response.json(),
                             service_name,
@@ -2493,7 +2755,9 @@ class HyundaiApi(PartsLink24API):
                         )
 
         if response is not None and response.status_code == 402:
-            print("Suscripción requerida para Hyundai. Verifica permisos de 'hyundai_parts' en tu cuenta.")
+            print(
+                "Suscripción requerida para Hyundai. Verifica permisos de 'hyundai_parts' en tu cuenta."
+            )
         return response
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
@@ -2505,7 +2769,10 @@ class HyundaiApi(PartsLink24API):
         results = []
         for item in items[:50]:
             item_url = item.get("url", "")
-            full_url = "https://www.partslink24.com/hyundai-kia-automotive-group/hyundai_parts/" + item_url
+            full_url = (
+                "https://www.partslink24.com/hyundai-kia-automotive-group/hyundai_parts/"
+                + item_url
+            )
             parsed = urlparse(full_url)
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
@@ -2514,31 +2781,38 @@ class HyundaiApi(PartsLink24API):
                 headers["Authorization"] = f"Bearer {self.access_token}"
 
             try:
-                detail_resp = self.session.get(product_url, headers=headers, params=params)
+                detail_resp = self.session.get(
+                    product_url, headers=headers, params=params
+                )
                 details = (
                     detail_resp.json()
                     if detail_resp.status_code == 200
-                    and "application/json" in detail_resp.headers.get("Content-Type", "")
+                    and "application/json"
+                    in detail_resp.headers.get("Content-Type", "")
                     else None
                 )
             except Exception:
                 details = None
 
-            results.append({
-                "caption": item.get("caption"),
-                "partno": item.get("partno"),
-                "pnc": item.get("pnc"),
-                "url": item_url,
-                "details": details,
-            })
+            results.append(
+                {
+                    "caption": item.get("caption"),
+                    "partno": item.get("partno"),
+                    "pnc": item.get("pnc"),
+                    "url": item_url,
+                    "details": details,
+                }
+            )
 
         # Formateo en tabla legible
         def trunc(s, n):
-            s = (s or "")
-            return (s[:n-1] + "…") if len(s) > n else s
+            s = s or ""
+            return (s[: n - 1] + "…") if len(s) > n else s
 
         print("\n" + "=" * 100)
-        print(f"RESULTADOS HYUNDAI — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)")
+        print(
+            f"RESULTADOS HYUNDAI — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+        )
         print("=" * 100)
         header = f"{'PARTNO':<18} {'PNC':<12} {'DESCRIPCIÓN':<40} {'URL':<25}"
         print(header)
@@ -2554,7 +2828,7 @@ class HyundaiApi(PartsLink24API):
 
         return results
 
-        
+
 class KiaApi(PartsLink24API):
     def __init__(self, account, user, password):
         super().__init__(account, user, password)
@@ -2573,6 +2847,7 @@ class KiaApi(PartsLink24API):
         product_url: Optional[str] = None,
         data_url: Optional[str] = None,
         page: Optional[str] = None,
+        car: Optional[str] = None,
     ):
         params = {
             "lang": "es",
@@ -2594,7 +2869,9 @@ class KiaApi(PartsLink24API):
         )
 
         # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+        if response.status_code == 200 and "application/json" in response.headers.get(
+            "Content-Type", ""
+        ):
             parsed_response = self.procesar_resultados(
                 response.json(),
                 service_name,
@@ -2605,7 +2882,9 @@ class KiaApi(PartsLink24API):
             return parsed_response
 
         # 401/402 → Refresh → Retry
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             refrescar = self.refresh_access_token(service_name, is_refresh=True)
             if refrescar:
                 self.save_session_state()
@@ -2617,7 +2896,10 @@ class KiaApi(PartsLink24API):
                     headers=headers,
                     params=params,
                 )
-                if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                if (
+                    response.status_code == 200
+                    and "application/json" in response.headers.get("Content-Type", "")
+                ):
                     return self.procesar_resultados(
                         response.json(),
                         service_name,
@@ -2627,7 +2909,9 @@ class KiaApi(PartsLink24API):
                     )
 
         # Re-login completo si sigue fallando
-        if response is not None and (response.status_code == 401 or response.status_code == 402):
+        if response is not None and (
+            response.status_code == 401 or response.status_code == 402
+        ):
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
             logged = self.login()
@@ -2643,7 +2927,11 @@ class KiaApi(PartsLink24API):
                         headers=headers,
                         params=params,
                     )
-                    if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                    if (
+                        response.status_code == 200
+                        and "application/json"
+                        in response.headers.get("Content-Type", "")
+                    ):
                         return self.procesar_resultados(
                             response.json(),
                             service_name,
@@ -2653,7 +2941,9 @@ class KiaApi(PartsLink24API):
                         )
 
         if response is not None and response.status_code == 402:
-            print("Suscripción requerida para KIA. Verifica permisos de 'kia_parts' en tu cuenta.")
+            print(
+                "Suscripción requerida para KIA. Verifica permisos de 'kia_parts' en tu cuenta."
+            )
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
         items = response_data.get("items", [])
@@ -2664,7 +2954,10 @@ class KiaApi(PartsLink24API):
         results = []
         for item in items[:50]:
             item_url = item.get("url", "")
-            full_url = "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/" + item_url
+            full_url = (
+                "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/"
+                + item_url
+            )
             parsed = urlparse(full_url)
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
@@ -2673,31 +2966,38 @@ class KiaApi(PartsLink24API):
                 headers["Authorization"] = f"Bearer {self.access_token}"
 
             try:
-                detail_resp = self.session.get(product_url, headers=headers, params=params)
+                detail_resp = self.session.get(
+                    product_url, headers=headers, params=params
+                )
                 details = (
                     detail_resp.json()
                     if detail_resp.status_code == 200
-                    and "application/json" in detail_resp.headers.get("Content-Type", "")
+                    and "application/json"
+                    in detail_resp.headers.get("Content-Type", "")
                     else None
                 )
             except Exception:
                 details = None
 
-            results.append({
-                "caption": item.get("caption"),
-                "partno": item.get("partno"),
-                "pnc": item.get("pnc"),
-                "url": item_url,
-                "details": details,
-            })
+            results.append(
+                {
+                    "caption": item.get("caption"),
+                    "partno": item.get("partno"),
+                    "pnc": item.get("pnc"),
+                    "url": item_url,
+                    "details": details,
+                }
+            )
 
         # Formateo en tabla legible
         def trunc(s, n):
-            s = (s or "")
-            return (s[:n-1] + "…") if len(s) > n else s
+            s = s or ""
+            return (s[: n - 1] + "…") if len(s) > n else s
 
         print("\n" + "=" * 100)
-        print(f"RESULTADOS KIA — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)")
+        print(
+            f"RESULTADOS KIA — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+        )
         print("=" * 100)
         header = f"{'PARTNO':<18} {'PNC':<12} {'DESCRIPCIÓN':<40} {'URL':<25}"
         print(header)
@@ -2714,7 +3014,7 @@ class KiaApi(PartsLink24API):
         return results
 
 
-def test(vin: str, brand: str, query: str):
+def test(vin: str, brand: str, query: str, car: Optional[str] = None):
     # Usamos la clase específica de la marca para que sea más limpio
     if brand.upper() == "VW":
         session_manager = VwAPI(ACCOUNT, USER, PASSWORD)
@@ -2744,7 +3044,7 @@ def test(vin: str, brand: str, query: str):
         session_manager = CitroenApi(ACCOUNT, USER, PASSWORD)
     elif brand.upper() == "PEUGEOT":
         session_manager = PeugeotApi(ACCOUNT, USER, PASSWORD)
-        
+
     elif brand.upper() == "HYUNDAI":
         session_manager = HyundaiApi(ACCOUNT, USER, PASSWORD)
 
@@ -2785,19 +3085,26 @@ def test(vin: str, brand: str, query: str):
         session_manager.consulta_url,
         session_manager.producto_url,
         session_manager.data_url,
+        car,
     )
 
 
- if __name__ == "__main__":
+if __name__ == "__main__":
+    num_args = len(sys.argv)
 
-    if len(sys.argv) != 4:
-         print(
-             "Error: Se requieren 3 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta'"
-         )
-         sys.exit(1)
-         vin = sys.argv[1]
-         marca = sys.argv[2]
-         pieza = sys.argv[3]
+    if num_args < 4 or num_args > 5:
+        print(
+            "Error: Se requieren 3 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta' 'golf'"
+        )
+        sys.exit(1)
+    vin = sys.argv[1]
+    marca = sys.argv[2]
+    pieza = sys.argv[3]
+
+    if num_args == 5:
+        car = sys.argv[4]
+    else:
+        car = None
 
     # marca = "smart"
     # vin = "WME4513311K043393"
@@ -2807,17 +3114,17 @@ def test(vin: str, brand: str, query: str):
     # vin = "WF0XXXTTFX8B77160"
     # pieza = "BOMBA DE VACIO"
 
-    #marca = "nissan"
-    #vin = "SJNFDAE11U1245311"
-    #pieza = "panel"
+    # marca = "nissan"
+    # vin = "SJNFDAE11U1245311"
+    # pieza = "panel"
 
-    #marca = "kia"
-    #vin = "KNEUP751256716941"
-    #pieza = "puerta"
+    # marca = "kia"
+    # vin = "KNEUP751256716941"
+    # pieza = "puerta"
 
-    #marca = "peugeot"
-    #vin = "VF30U9HD8DS031095"
-    #pieza = "puerta"
+    # marca = "peugeot"
+    # vin = "VF30U9HD8DS031095"
+    # pieza = "puerta"
 
     # marca = "citroen"
     # vin = "VF7GJWJYB93233667"
@@ -2828,8 +3135,10 @@ def test(vin: str, brand: str, query: str):
     # pieza = "kit de distribucion"
 
     # marca = "seat"
-    # vin = "VSSZZZ6LZ4R224453"
+    # # vin = "VSSZZZ6LZ4R224453"
+    # vin = "VSSZZZ1MZ3R068750"
     # pieza = "cerradura de puerta"
+    # car = "toledo"
 
     # marca = "renault"
     # vin = "VF1LA050527117013"
@@ -2839,13 +3148,13 @@ def test(vin: str, brand: str, query: str):
     # vin = "KMHST81UADU066300"
     # pieza = "puerta"          # term
 
-    #marca = "OPEL"
-    #vin = "W0LMRF4SEEB062229"
-    #pieza = "filtros "
+    # marca = "OPEL"
+    # vin = "W0LMRF4SEEB062229"
+    # pieza = "filtros "
 
     # vin = "JTEBZ29J100180316"
     # marca = "toyota"
-    # pieza = "panel de puerta"
+    # pieza = "cerradura de puerta"
 
     # marca = "VW"
     # pieza = "Medidor de aire"
@@ -2867,9 +3176,9 @@ def test(vin: str, brand: str, query: str):
     # vin = "TMBCF46Y123582689"
     # pieza = "cerradura de puerta"
 
-    #marca = "citroen"
-    #vin = "VF7GJWJYB93233667"
-    #pieza = "cerradura de puerta"
+    # marca = "citroen"
+    # vin = "VF7GJWJYB93233667"
+    # pieza = "cerradura de puerta"
 
     # COMENTAR TODOS LOS PRINT SI YA NO HAY NADA QUE DEPURAR
 
@@ -2879,4 +3188,4 @@ def test(vin: str, brand: str, query: str):
         )
     else:
 
-        test(vin, marca, pieza)
+        test(vin, marca, pieza, car)
