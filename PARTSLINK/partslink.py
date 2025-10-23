@@ -1306,7 +1306,7 @@ class OpelApi(PartsLink24API):
         if response is not None and (
             response.status_code == 401 or response.status_code == 402
         ):
-            refrescar = self.refresh_access_token(service_name, is_refresh=True)
+            refrescar = self.refresh_access_token([service_name], is_refresh=True)
             if refrescar:
                 self.save_session_state()
                 self.load_session_state()
@@ -1337,7 +1337,7 @@ class OpelApi(PartsLink24API):
                 os.remove(self.session_file)
             logged = self.login()
             if logged:
-                ok = self.refresh_access_token(service_name, is_refresh=False)
+                ok = self.refresh_access_token([service_name], is_refresh=False)
                 if ok:
                     self.save_session_state()
                     self.load_session_state()
@@ -1431,7 +1431,7 @@ class OpelApi(PartsLink24API):
 
         return results
 
-    def consultar_imagen_pieza_desde_url(self, item_url, base_url="https://www.partslink24.com"):
+    def consultar_imagen_pieza_desde_url(self, item_url, base_url="https://www.partslink24.com", max_parts=None):
         """
         Consulta la URL de imagen de una pieza directamente desde la URL proporcionada en el item.
         Específico para OPEL.
@@ -1439,6 +1439,7 @@ class OpelApi(PartsLink24API):
         Args:
             item_url: URL del item (campo 'url' del resultado de búsqueda)
             base_url: URL base del servicio
+            max_parts: Número máximo de piezas válidas a extraer (None = sin límite)
             
         Returns:
             dict: Información detallada de la pieza incluyendo diagramas e ilustraciones
@@ -1505,6 +1506,10 @@ class OpelApi(PartsLink24API):
                         rows = target_table.find_all('tr', class_=re.compile(r'tc-row tc-data-row'))
                         
                         for row in rows:
+                            # Si ya alcanzamos el límite máximo, salir del bucle
+                            if max_parts is not None and len(valid_parts) >= max_parts:
+                                break
+                                
                             # Verificar que tenga valid="true"
                             valid_attr = row.get('valid', '').lower()
                             if valid_attr == 'true':
@@ -1604,7 +1609,7 @@ class OpelApi(PartsLink24API):
                     if isinstance(piezas_html, list) and len(piezas_html) > 0:
                         resultados_html.append(piezas_html)
                     
-                    time.sleep(0.3)  # Pausa para no sobrecargar el servidor
+                    time.sleep(0.1)  # Pausa para no sobrecargar el servidor
             
             # print(f"✅ Procesados {len(resultados_html)} resultados HTML")
             
@@ -1671,47 +1676,64 @@ class OpelApi(PartsLink24API):
             resultados_finales = list(piezas_unicas.values())
             estadisticas["piezas_antes_filtro"] = len(resultados_finales)
             
-            # 3.5. FILTRAR POR RELEVANCIA CON EL TÉRMINO DE BÚSQUEDA (OPCIONAL)
+            # 3.5. FILTRAR POR RELEVANCIA CON EL TÉRMINO DE BÚSQUEDA (MEJORADO)
             if aplicar_filtro:
                 def es_relevante(pieza, termino_busqueda):
-                    """Verifica si una pieza es relevante al término de búsqueda con búsqueda flexible"""
-                    termino_lower = termino_busqueda.lower().strip()
-                    if not termino_lower:
-                        return True
+                    """Verifica si una pieza es relevante al término de búsqueda con coincidencias flexibles"""
+                    termino_original = termino_busqueda.strip()
+                    termino_lower = termino_original.lower()
                     
-                    # Dividir el término en palabras individuales para búsqueda más flexible
-                    palabras_busqueda = [palabra.strip() for palabra in termino_lower.split() if palabra.strip()]
-                    if not palabras_busqueda:
+                    if not termino_lower:
                         return True
                     
                     # Obtener campos específicos normalizados
                     caption = pieza.get('caption', '').lower().strip()
                     description = pieza.get('description', '').lower().strip()
-                    gmNo = pieza.get('gmNo', '').lower().strip()
-                    partNumber = pieza.get('partNumber', '').lower().strip()
-                    json_desc = pieza.get('json_source', {}).get('description', '').lower().strip() if pieza.get('json_source') else ''
+                    gm_no = pieza.get('gmNo', '').lower().strip()
+                    gm_opel_no = pieza.get('gmOpelNo', '').lower().strip()
                     
-                    # CRITERIO PRINCIPAL: Si el término está en caption, es válido
-                    for palabra in palabras_busqueda:
-                        if len(palabra) >= 3 and palabra in caption:
-                            return True
+                    # Obtener descripción del JSON source si existe
+                    json_desc = ""
+                    if pieza.get('json_source') and pieza['json_source']:
+                        json_desc = pieza['json_source'].get('description', '').lower().strip()
                     
-                    # CRITERIO SECUNDARIO: Si no está en caption, buscar en description con mayor exigencia
-                    for palabra in palabras_busqueda:
-                        if len(palabra) >= 4 and palabra in description:
-                            return True
+                    # CRITERIO 1: Coincidencia exacta del término completo en caption (prioridad máxima)
+                    if termino_lower in caption:
+                        return True
                     
-                    # CRITERIO TERCIARIO: Búsqueda exacta en números de parte (muy específica)
-                    if len(termino_lower) >= 3:
-                        # Buscar término completo en gmNo o partNumber
-                        if termino_lower in gmNo or termino_lower in partNumber:
-                            return True
-                        
-                        # Buscar palabras individuales largas en números de parte
+                    # CRITERIO 2: Coincidencia exacta del término completo en description
+                    if termino_lower in description:
+                        return True
+                    
+                    # CRITERIO 3: Coincidencia exacta del término completo en json_desc
+                    if json_desc and termino_lower in json_desc:
+                        return True
+                    
+                    # CRITERIO 4: Coincidencias parciales flexibles (para términos como "filtros")
+                    # Dividir el término en palabras para búsqueda más granular
+                    palabras_busqueda = [palabra.strip() for palabra in termino_lower.split() if palabra.strip() and len(palabra.strip()) >= 3]
+                    
+                    if palabras_busqueda:
+                        # Buscar cada palabra en caption (más flexible)
                         for palabra in palabras_busqueda:
-                            if len(palabra) >= 5:  # Solo palabras muy específicas
-                                if palabra in gmNo or palabra in partNumber:
+                            if palabra in caption:
+                                return True
+                        
+                        # Buscar cada palabra en description (con mayor longitud mínima)
+                        for palabra in palabras_busqueda:
+                            if len(palabra) >= 4 and palabra in description:
+                                return True
+                        
+                        # Buscar cada palabra en json_desc
+                        if json_desc:
+                            for palabra in palabras_busqueda:
+                                if len(palabra) >= 4 and palabra in json_desc:
                                     return True
+                    
+                    # CRITERIO 5: Coincidencias en números de parte (muy específicas)
+                    if len(termino_lower) >= 4:
+                        if termino_lower in gm_no or termino_lower in gm_opel_no:
+                            return True
                     
                     return False
                 
@@ -1937,7 +1959,7 @@ class NissanApi(PartsLink24API):
         if response is not None and (
             response.status_code == 401 or response.status_code == 402
         ):
-            refrescar = self.refresh_access_token(service_name, is_refresh=True)
+            refrescar = self.refresh_access_token([service_name], is_refresh=True)
             if refrescar:
                 self.save_session_state()
                 self.load_session_state()
@@ -1968,7 +1990,7 @@ class NissanApi(PartsLink24API):
                 os.remove(self.session_file)
             logged = self.login()
             if logged:
-                ok = self.refresh_access_token(service_name, is_refresh=False)
+                ok = self.refresh_access_token([service_name], is_refresh=False)
                 if ok:
                     self.save_session_state()
                     self.load_session_state()
@@ -3062,7 +3084,7 @@ class PeugeotApi(PartsLink24API):
         for r in results:
             print(
                 f"{trunc(r.get('partno',''),18):<18} "
-                f"{trunc(r.get('caption',''),40):<40} "
+                f"{trunc(r.get('caption',''),70):<70} "
                 f"{trunc(r.get('url',''),25):<25}"
             )
         print("=" * 100)
