@@ -3258,101 +3258,111 @@ class KiaApi(PartsLink24API):
         page: Optional[str] = None,
         car: Optional[str] = None,
     ):
-        params = {
-            "lang": "es",
-            "serviceName": service_name,
-            "vin": vin,
-            "term": term,
-            "page": page if page else "0",
-        }
+        all_results = []
+        page = 0
+        max_pages = 10  # Límite de páginas para evitar bucles infinitos
+        
+        while page < max_pages:
+            params = {
+                "lang": "es",
+                "serviceName": service_name,
+                "vin": vin,
+                "term": term,
+                "page": str(page),
+            }
 
-        headers = self.headers.copy()
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
-
-        palabra_clave = term.lower().strip()
-        response = self.session.get(
-            url=search_url or self.consulta_url,
-            headers=headers,
-            params=params,
-        )
-
-        # OK + JSON
-        if response.status_code == 200 and "application/json" in response.headers.get(
-            "Content-Type", ""
-        ):
-            parsed_response = self.procesar_resultados(
-                response.json(),
-                service_name,
-                vin,
-                product_url or self.producto_url,
-                palabra_clave,
-            )
-            return parsed_response
-
-        # 401/402 → Refresh → Retry
-        if response is not None and (
-            response.status_code == 401 or response.status_code == 402
-        ):
-            refrescar = self.refresh_access_token(service_name, is_refresh=True)
-            if refrescar:
-                self.save_session_state()
-                self.load_session_state()
-                headers = self.headers.copy()
+            headers = self.headers.copy()
+            if self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
-                response = self.session.get(
-                    url=search_url or self.consulta_url,
-                    headers=headers,
-                    params=params,
-                )
-                if (
-                    response.status_code == 200
-                    and "application/json" in response.headers.get("Content-Type", "")
-                ):
-                    return self.procesar_resultados(
-                        response.json(),
-                        service_name,
-                        vin,
-                        product_url or self.producto_url,
-                        palabra_clave,
-                    )
 
-        # Re-login completo si sigue fallando
-        if response is not None and (
-            response.status_code == 401 or response.status_code == 402
-        ):
-            if os.path.exists(self.session_file):
-                os.remove(self.session_file)
-            logged = self.login()
-            if logged:
-                ok = self.refresh_access_token(service_name, is_refresh=False)
-                if ok:
-                    self.save_session_state()
-                    self.load_session_state()
-                    headers = self.headers.copy()
-                    headers["Authorization"] = f"Bearer {self.access_token}"
-                    response = self.session.get(
-                        url=search_url or self.consulta_url,
-                        headers=headers,
-                        params=params,
-                    )
-                    if (
-                        response.status_code == 200
-                        and "application/json"
-                        in response.headers.get("Content-Type", "")
-                    ):
-                        return self.procesar_resultados(
-                            response.json(),
-                            service_name,
-                            vin,
-                            product_url or self.producto_url,
-                            palabra_clave,
-                        )
-
-        if response is not None and response.status_code == 402:
-            print(
-                "Suscripción requerida para KIA. Verifica permisos de 'kia_parts' en tu cuenta."
+            response = self.session.get(
+                url=search_url or self.consulta_url,
+                headers=headers,
+                params=params,
             )
+
+            # Manejar errores de autenticación
+            if response.status_code in [401, 402]:
+                if page == 0:  # Solo intentar reautenticación en la primera página
+                    refrescar = self.refresh_access_token(service_name, is_refresh=True)
+                    if refrescar:
+                        self.save_session_state()
+                        self.load_session_state()
+                        headers = self.headers.copy()
+                        headers["Authorization"] = f"Bearer {self.access_token}"
+                        response = self.session.get(
+                            url=search_url or self.consulta_url,
+                            headers=headers,
+                            params=params,
+                        )
+                    else:
+                        # Re-login completo
+                        if os.path.exists(self.session_file):
+                            os.remove(self.session_file)
+                        logged = self.login()
+                        if logged:
+                            ok = self.refresh_access_token(service_name, is_refresh=False)
+                            if ok:
+                                self.save_session_state()
+                                self.load_session_state()
+                                headers = self.headers.copy()
+                                headers["Authorization"] = f"Bearer {self.access_token}"
+                                response = self.session.get(
+                                    url=search_url or self.consulta_url,
+                                    headers=headers,
+                                    params=params,
+                                )
+                else:
+                    # En páginas posteriores, si hay error de auth, terminar
+                    print(f"Error de autenticación en página {page}. Terminando paginación.")
+                    break
+
+            # Verificar respuesta exitosa
+            if response.status_code == 200 and "application/json" in response.headers.get("Content-Type", ""):
+                response_data = response.json()
+                
+                # Procesar resultados de esta página
+                page_results = self.procesar_resultados(
+                    response_data,
+                    service_name,
+                    vin,
+                    product_url or self.producto_url,
+                    term,
+                )
+                
+                if page_results:
+                    all_results.extend(page_results)
+                
+                # Verificar si hay más páginas disponibles
+                next_page_available = response_data.get("nextPageAvailable", False)
+                if not next_page_available:
+                    break
+                    
+                page += 1
+            else:
+                if response.status_code == 402:
+                    print("Suscripción requerida para KIA. Verifica permisos de 'kia_parts' en tu cuenta.")
+                break
+
+        # Mostrar resultados consolidados
+        if all_results:
+            print("\n" + "="*80)
+            print(f"RESULTADOS KIA — VIN {vin} — Búsqueda: {term} — {len(all_results)} elemento(s)")
+            print(f"Información básica: {len(all_results)} | Páginas procesadas: {page}")
+            print("="*80)
+            print(f"{'PARTNO':<18} {'PNC':<5} {'DESCRIPCIÓN':<55}")
+            print("-"*80)
+            
+            for result in all_results:
+                partno = result.get('partno', '')[:17]
+                pnc = result.get('pnc', '')[:4]
+                caption = result.get('caption', '')[:54]
+                
+                print(f"{partno:<18} {pnc:<5} {caption:<55}")
+            
+            print("="*80)
+        
+        return all_results
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
         items = response_data.get("items", [])
@@ -3551,9 +3561,9 @@ if __name__ == "__main__":
     # vin = "SJNFDAE11U1245311"
     # pieza = "panel"
 
-    # marca = "kia"
-    # vin = "KNEUP751256716941"
-    # pieza = "puerta"
+    marca = "kia"
+    vin = "KNEUP751256716941"
+    pieza = "puerta"
 
     # marca = "peugeot"
     # vin = "VF30U9HD8DS031095"
@@ -3577,9 +3587,9 @@ if __name__ == "__main__":
     # vin = "VF1LA050527117013"
     # pieza = "cerradura de puerta"
 
-    marca = "HYUNDAI"
-    vin = "KMHST81UADU066300"
-    pieza = "puerta"          # term
+    #marca = "HYUNDAI"
+    #vin = "KMHST81UADU066300"
+    #pieza = "puerta"          # term
 
     #marca = "OPEL"
     #vin = "W0LMRF4SEEB062229"
