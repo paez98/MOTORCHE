@@ -7,7 +7,7 @@ import json
 import sys
 from collections import defaultdict
 from dotenv import load_dotenv
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 from typing import Optional
 from bs4 import BeautifulSoup
 
@@ -155,7 +155,8 @@ BRAND_DATA = {
     "KIA": {
         "service_name": "kia_parts",
         "consulta_url": "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/json-vin-search.action",
-        "producto_url": "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/main-group.action",
+        "producto_url": "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/vin-image-board.action?",
+        "partes_url": "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/json-vin-bom-detail.action",
         "datos_url": "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/directAccess",
     },
     "LANCIA": {
@@ -302,6 +303,7 @@ BRAND_DATA = {
         "consulta_url": "https://www.partslink24.com/p5vwag/extern/search/vin",
         "producto_url": "https://www.partslink24.com/p5vwag/extern/bom/vin",
         "datos_url": "https://www.partslink24.com/p5vwag/extern/directAccess",
+        "image_url": "https://www.partslink24.com/imageserver/ext/api/images/",
     },
     "VMCLASSIC": {
         "service_name": "vmclassic_parts",
@@ -330,7 +332,6 @@ class PartsLink24API:
     def __init__(self, account, user, password):
         self.session = requests.Session()
         self.logout_session = requests.Session()
-
         self.login_url = (
             "https://www.partslink24.com/partslink24/login-ajax!login.action"
         )
@@ -419,11 +420,11 @@ class PartsLink24API:
 
         return True
 
-    def refresh_access_token(self, service_name, is_refresh=True):
+    def refresh_access_token(self, is_refresh=True):
         action = "Refrescando" if is_refresh else "Solicitando"
         # print(f"{action} token de acceso...")
         try:
-            auth_payload = {"serviceNames": service_name, "withLogin": True}
+            auth_payload = {"serviceNames": ALL_SERVICES, "withLogin": True}
             print(self.access_token)
 
             response_auth = self.session.post(
@@ -823,12 +824,49 @@ class VwAPI(PartsLink24API):
         self.consulta_url = brand_info.get("consulta_url")
         self.producto_url = brand_info.get("producto_url")
         self.data_url = brand_info.get("datos_url")
+        self.image_url = brand_info.get("image_url")
+
+    def get_images(self, response_data: dict, query: str, vin: str):
+        print(response_data)
+        bidata_illutration = response_data.get("catalogContext", {}).get(
+            "bidata_illustration"
+        )
+
+        image_url = response_data.get("data", {}).get("images", [])[0].get("uri")
+        full_image_url = urljoin(self.image_url, bidata_illutration)
+        parsed_url = urlparse(image_url)
+        query_params = parse_qs(parsed_url.query)
+        name = f"{query.replace(' ','_')}_{vin}.png"
+
+        payload = {}
+
+        for p in query_params:
+            payload[p] = query_params[p][0]
+
+        headers = self.headers.copy()
+        headers["Authorization"] = f"Bearer {self.access_token}"
+
+        response_image = self.session.get(url=full_image_url, params=payload)
+
+        image_data = response_image.json().get("image")
+        image_base64 = base64.b64decode(image_data)
+
+        folder = "PARTSLINK/IMAGES/Volskwagen_Images"
+
+        os.makedirs(folder, exist_ok=True)
+        file_name_path = os.path.join(folder, name)
+
+        with open(file_name_path, "wb") as img_file:
+            img_file.write(image_base64)
+
+        return True
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
         """
         Procesa los resultados, valida piezas en sub-consultas y acumula
         todos los resultados válidos en un único diccionario, evitando duplicados.
         """
+
         productos_data = {}
         registros_vistos = set()
 
@@ -838,6 +876,7 @@ class VwAPI(PartsLink24API):
             if indice >= 10:
                 break
             try:
+
                 bt_page = record.get("recordContext", {}).get("bidata_bt_page")
                 path_info = record.get("p5goto", {}).get("ws", [{}])[0].get("path", "")
 
@@ -865,7 +904,7 @@ class VwAPI(PartsLink24API):
                     product_url, headers=consulta_headers, params=params_producto
                 )
                 print(consulta_producto.url)
-
+                self.get_images(consulta_producto.json(), query, vin)
                 if consulta_producto.status_code == 200:
                     response_data_product = consulta_producto.json()
                     crumbs = response_data_product.get("crumbs", [])
@@ -1168,60 +1207,64 @@ class OpelApi(PartsLink24API):
         try:
             # URL inicial para obtener el catId
             initial_url = f"https://www.partslink24.com/opel/opel_parts/vin.action?mode=A0LW0ESES&lang=es&vin={vin}&startup=true"
-            
+
             headers = self.headers.copy()
             if self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
-            
+
             # Realizar la petición permitiendo redirecciones
-            response = self.session.get(initial_url, headers=headers, allow_redirects=True)
-            
+            response = self.session.get(
+                initial_url, headers=headers, allow_redirects=True
+            )
+
             # Método 1: Extraer catId de la URL final
             final_url = response.url
             parsed_url = urlparse(final_url)
             params = parse_qs(parsed_url.query)
-            
-            if 'catId' in params:
-                cat_id = params['catId'][0]
+
+            if "catId" in params:
+                cat_id = params["catId"][0]
                 print(f"catId extraído de URL: {cat_id}")
                 self.cat_id = cat_id
                 return cat_id
-            
+
             # Método 2: Buscar en el historial de redirecciones
             for resp in response.history:
-                if 'Location' in resp.headers:
-                    location_url = resp.headers['Location']
+                if "Location" in resp.headers:
+                    location_url = resp.headers["Location"]
                     parsed_location = urlparse(location_url)
                     location_params = parse_qs(parsed_location.query)
-                    
-                    if 'catId' in location_params:
-                        cat_id = location_params['catId'][0]
+
+                    if "catId" in location_params:
+                        cat_id = location_params["catId"][0]
                         self.cat_id = cat_id
                         return cat_id
-            
+
             # Método 3: Buscar en headers de respuesta personalizados
             for header_name, header_value in response.headers.items():
-                if 'catid' in header_name.lower() or 'cat-id' in header_name.lower():
+                if "catid" in header_name.lower() or "cat-id" in header_name.lower():
                     print(f"catId encontrado en header {header_name}: {header_value}")
                     self.cat_id = header_value
                     return header_value
-            
+
             # Método 4: Buscar en el contenido HTML si es necesario
-            if 'text/html' in response.headers.get('Content-Type', ''):
+            if "text/html" in response.headers.get("Content-Type", ""):
                 from urllib.parse import unquote
+
                 content = response.text
                 # Buscar patrones como catId=1 en el HTML
                 import re
-                cat_id_match = re.search(r'catId[=:](\d+)', content)
+
+                cat_id_match = re.search(r"catId[=:](\d+)", content)
                 if cat_id_match:
                     cat_id = cat_id_match.group(1)
                     print(f"catId extraído del HTML: {cat_id}")
                     self.cat_id = cat_id
                     return cat_id
-            
+
             print("No se pudo extraer el catId")
             return None
-            
+
         except Exception as e:
             print(f"Error al extraer catId: {e}")
             return None
@@ -1229,21 +1272,21 @@ class OpelApi(PartsLink24API):
     def obtener_cat_id(self, vin: Optional[str] = None) -> Optional[str]:
         """
         Método público para obtener el catId.
-        
+
         Args:
             vin: VIN del vehículo (opcional si ya se tiene cat_id)
-            
+
         Returns:
             str: El catId extraído o None si no se pudo obtener
         """
         # Si ya tenemos cat_id, lo devolvemos
-        if hasattr(self, 'cat_id') and self.cat_id:
+        if hasattr(self, "cat_id") and self.cat_id:
             return self.cat_id
-            
+
         # Si no tenemos cat_id pero tenemos VIN, intentamos extraerlo
         if vin:
             return self.extraer_cat_id(vin)
-            
+
         print("No se puede obtener catId: no hay cat_id existente ni VIN proporcionado")
         return None
 
@@ -1259,22 +1302,22 @@ class OpelApi(PartsLink24API):
         car: Optional[str] = None,
     ):
         # Extraer catId dinámicamente si no lo tenemos
-        if not hasattr(self, 'cat_id') or not self.cat_id:
+        if not hasattr(self, "cat_id") or not self.cat_id:
             cat_id = self.extraer_cat_id(vin)
             if not cat_id:
                 # print("Error: No se pudo obtener el catId necesario para OPEL")
                 return None
             self.cat_id = cat_id
-        
+
         params = {
             "lang": "es",
             "page": page if page else "0",
             "term": term,
             "vin": vin,
         }
-        
+
         # Agregar catId a los parámetros si está disponible
-        if hasattr(self, 'cat_id') and self.cat_id:
+        if hasattr(self, "cat_id") and self.cat_id:
             params["catId"] = self.cat_id
 
         headers = self.headers.copy()
@@ -1431,36 +1474,40 @@ class OpelApi(PartsLink24API):
 
         return results
 
-    def consultar_imagen_pieza_desde_url(self, item_url, base_url="https://www.partslink24.com", max_parts=None):
+    def consultar_imagen_pieza_desde_url(
+        self, item_url, base_url="https://www.partslink24.com", max_parts=None
+    ):
         """
         Consulta la URL de imagen de una pieza directamente desde la URL proporcionada en el item.
         Específico para OPEL.
-        
+
         Args:
             item_url: URL del item (campo 'url' del resultado de búsqueda)
             base_url: URL base del servicio
             max_parts: Número máximo de piezas válidas a extraer (None = sin límite)
-            
+
         Returns:
             dict: Información detallada de la pieza incluyendo diagramas e ilustraciones
         """
         try:
             # Construir URL completa para OPEL
-            if item_url.startswith('vin-image-board.action') or not item_url.startswith('http'):
+            if item_url.startswith("vin-image-board.action") or not item_url.startswith(
+                "http"
+            ):
                 url = f"{base_url}/opel/opel_parts/{item_url.lstrip('/')}"
             else:
                 url = item_url
-            
+
             # print(f"🔍 Consultando URL de imagen OPEL...")
             # print(f"📍 URL: {url}")
-            
+
             # Realizar la petición con autenticación
             headers = self.headers.copy()
             if self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
-            
+
             response = self.session.get(url, headers=headers, timeout=30)
-            
+
             # Manejar códigos de estado de autenticación
             if response.status_code in [401, 402]:
                 # print("🔄 Token expirado, intentando refrescar...")
@@ -1479,58 +1526,64 @@ class OpelApi(PartsLink24API):
                     else:
                         return {
                             "status": "error",
-                            "message": "No se pudo autenticar después de varios intentos"
+                            "message": "No se pudo autenticar después de varios intentos",
                         }
-            
+
             if response.status_code != 200:
                 return {
                     "status": "error",
                     "message": f"Error HTTP {response.status_code}: {response.reason}",
-                    "url": url
+                    "url": url,
                 }
-            
-            content_type = response.headers.get('Content-Type', '').lower()
-            
+
+            content_type = response.headers.get("Content-Type", "").lower()
+
             # Para OPEL siempre esperamos HTML, no JSON
-            if 'text/html' in content_type:
+            if "text/html" in content_type:
                 try:
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
+                    soup = BeautifulSoup(response.content, "html.parser")
+
                     # Buscar la tabla específica de OPEL: class="tc-table" id="nav-bomDetails-table"
-                    target_table = soup.find('table', {'class': 'tc-table', 'id': 'nav-bomDetails-table'})
-                    
+                    target_table = soup.find(
+                        "table", {"class": "tc-table", "id": "nav-bomDetails-table"}
+                    )
+
                     if target_table:
                         valid_parts = []
-                        
+
                         # Buscar todas las filas tr con clase "tc-row tc-data-row"
-                        rows = target_table.find_all('tr', class_=re.compile(r'tc-row tc-data-row'))
-                        
+                        rows = target_table.find_all(
+                            "tr", class_=re.compile(r"tc-row tc-data-row")
+                        )
+
                         for row in rows:
                             # Si ya alcanzamos el límite máximo, salir del bucle
                             if max_parts is not None and len(valid_parts) >= max_parts:
                                 break
-                                
+
                             # Verificar que tenga valid="true"
-                            valid_attr = row.get('valid', '').lower()
-                            if valid_attr == 'true':
+                            valid_attr = row.get("valid", "").lower()
+                            if valid_attr == "true":
                                 # Extraer gmNo
-                                gm_no = row.get('gmno', '').strip()
-                                
+                                gm_no = row.get("gmno", "").strip()
+
                                 # Solo procesar si tiene gmNo y no está vacío
-                                if gm_no and gm_no != ' ':
+                                if gm_no and gm_no != " ":
                                     # Extraer gmOpelNo
-                                    gm_opel_no = row.get('gmopelno', '').strip()
-                                    
+                                    gm_opel_no = row.get("gmopelno", "").strip()
+
                                     # Extraer caption
-                                    caption = row.get('caption', '').strip()
-                                    
+                                    caption = row.get("caption", "").strip()
+
                                     # Agregar a la lista en el orden solicitado: gmNo, gmOpelNo, caption
-                                    valid_parts.append({
-                                        'gmNo': gm_no,
-                                        'gmOpelNo': gm_opel_no,
-                                        'caption': caption
-                                    })
-                        
+                                    valid_parts.append(
+                                        {
+                                            "gmNo": gm_no,
+                                            "gmOpelNo": gm_opel_no,
+                                            "caption": caption,
+                                        }
+                                    )
+
                         # Si hay piezas válidas, retornar directamente la lista
                         if valid_parts:
                             return valid_parts
@@ -1540,52 +1593,52 @@ class OpelApi(PartsLink24API):
                     else:
                         # Si no se encuentra la tabla, retornar lista vacía
                         return []
-                    
+
                 except Exception as e:
                     return {
                         "status": "error",
                         "message": f"Error al procesar HTML: {e}",
-                        "url": url
+                        "url": url,
                     }
-            
+
             else:
                 return {
                     "status": "error",
                     "message": f"Tipo de contenido no soportado: {content_type}",
-                    "url": url
+                    "url": url,
                 }
-                
+
         except Exception as e:
             return {
                 "status": "error",
                 "message": f"Error en la consulta: {e}",
-                "url": item_url
+                "url": item_url,
             }
 
-    def buscar_y_consultar_imagenes(self, vin: str, term: str, aplicar_filtro: bool = True):
+    def buscar_y_consultar_imagenes(
+        self, vin: str, term: str, aplicar_filtro: bool = True
+    ):
         """
         Busca piezas y consulta información de imagen para cada resultado.
         Combina resultados de búsqueda JSON y extracción HTML eliminando duplicados por gmNo.
-        
+
         Args:
             vin: VIN del vehículo
             term: Término de búsqueda
             max_resultados: Número máximo de resultados a procesar
-            
+
         Returns:
             Lista de resultados combinados sin duplicados por gmNo
         """
         try:
             # print(f"🔍 Iniciando búsqueda combinada para VIN: {vin}, término: '{term}'")
-            
+
             # 1. OBTENER RESULTADOS DE BÚSQUEDA JSON (método buscar_pieza)
             # print("\n📋 Fase 1: Obteniendo resultados de búsqueda JSON...")
             resultados_busqueda = self.buscar_pieza(
-                vin=vin,
-                term=term,
-                service_name=self.service_name
+                vin=vin, term=term, service_name=self.service_name
             )
-            
+
             resultados_json = []
             if resultados_busqueda and isinstance(resultados_busqueda, list):
                 # print(f"✅ Encontrados {len(resultados_busqueda)} resultados en búsqueda JSON")
@@ -1593,38 +1646,38 @@ class OpelApi(PartsLink24API):
             else:
                 # print("⚠️ No se obtuvieron resultados de búsqueda JSON")
                 pass
-            
+
             # 2. OBTENER RESULTADOS DE EXTRACCIÓN HTML
             # print("\n🌐 Fase 2: Obteniendo resultados de extracción HTML...")
             resultados_html = []
-            
+
             # Procesar cada resultado JSON para obtener información HTML
             for i, resultado in enumerate(resultados_json):
                 item_url = resultado.get("url")
                 if item_url:
                     # print(f"🔍 Extrayendo HTML del resultado {i+1}/{len(resultados_json)}")
                     piezas_html = self.consultar_imagen_pieza_desde_url(item_url)
-                    
+
                     # Ahora piezas_html es directamente una lista de piezas válidas
                     if isinstance(piezas_html, list) and len(piezas_html) > 0:
                         resultados_html.append(piezas_html)
-                    
+
                     time.sleep(0.1)  # Pausa para no sobrecargar el servidor
-            
+
             # print(f"✅ Procesados {len(resultados_html)} resultados HTML")
-            
+
             # 3. COMBINAR Y ELIMINAR DUPLICADOS POR gmNo
             # print("\n🔄 Fase 3: Combinando resultados y eliminando duplicados...")
-            
+
             piezas_unicas = {}  # Diccionario para eliminar duplicados por gmNo
             estadisticas = {
                 "total_json": len(resultados_json),
                 "total_html": len(resultados_html),
                 "piezas_html_extraidas": 0,
                 "duplicados_eliminados": 0,
-                "piezas_finales": 0
+                "piezas_finales": 0,
             }
-            
+
             # Procesar resultados HTML y extraer piezas válidas
             for i, resultado_html in enumerate(resultados_html):
                 # Ahora resultado_html es directamente una lista de piezas válidas
@@ -1633,27 +1686,29 @@ class OpelApi(PartsLink24API):
                     json_source = resultados_json[i] if i < len(resultados_json) else {}
                 else:
                     # Compatibilidad con formato anterior (por si acaso)
-                    valid_parts = resultado_html if isinstance(resultado_html, list) else []
+                    valid_parts = (
+                        resultado_html if isinstance(resultado_html, list) else []
+                    )
                     json_source = {}
-                
+
                 estadisticas["piezas_html_extraidas"] += len(valid_parts)
-                
+
                 for pieza in valid_parts:
                     gm_no = pieza.get("gmNo", "").strip()
-                    
+
                     if gm_no and gm_no != " ":
                         if gm_no in piezas_unicas:
                             # Duplicado encontrado - mantener el que tenga más información
                             estadisticas["duplicados_eliminados"] += 1
                             existing = piezas_unicas[gm_no]
-                            
+
                             # Combinar información si es necesario
                             if not existing.get("json_source") and json_source:
                                 existing["json_source"] = {
                                     "partno": json_source.get("partno"),
                                     "description": json_source.get("caption"),
                                     "url_original": json_source.get("url"),
-                                    "details": json_source.get("details")
+                                    "details": json_source.get("details"),
                                 }
                         else:
                             # Nueva pieza única
@@ -1662,86 +1717,103 @@ class OpelApi(PartsLink24API):
                                 "gmOpelNo": pieza.get("gmOpelNo", ""),
                                 "caption": pieza.get("caption", ""),
                                 "source": "html_extraction",
-                                "json_source": {
-                                    "partno": json_source.get("partno"),
-                                    "description": json_source.get("caption"),
-                                    "url_original": json_source.get("url"),
-                                    "details": json_source.get("details")
-                                } if json_source else None,
-                                "url_original": json_source.get("url", "") if json_source else ""
+                                "json_source": (
+                                    {
+                                        "partno": json_source.get("partno"),
+                                        "description": json_source.get("caption"),
+                                        "url_original": json_source.get("url"),
+                                        "details": json_source.get("details"),
+                                    }
+                                    if json_source
+                                    else None
+                                ),
+                                "url_original": (
+                                    json_source.get("url", "") if json_source else ""
+                                ),
                             }
                             piezas_unicas[gm_no] = pieza_completa
-            
+
             # Convertir diccionario a lista ordenada
             resultados_finales = list(piezas_unicas.values())
             estadisticas["piezas_antes_filtro"] = len(resultados_finales)
-            
+
             # 3.5. FILTRAR POR RELEVANCIA CON EL TÉRMINO DE BÚSQUEDA (MEJORADO)
             if aplicar_filtro:
+
                 def es_relevante(pieza, termino_busqueda):
                     """Verifica si una pieza es relevante al término de búsqueda con coincidencias flexibles"""
                     termino_original = termino_busqueda.strip()
                     termino_lower = termino_original.lower()
-                    
+
                     if not termino_lower:
                         return True
-                    
+
                     # Obtener campos específicos normalizados
-                    caption = pieza.get('caption', '').lower().strip()
-                    description = pieza.get('description', '').lower().strip()
-                    gm_no = pieza.get('gmNo', '').lower().strip()
-                    gm_opel_no = pieza.get('gmOpelNo', '').lower().strip()
-                    
+                    caption = pieza.get("caption", "").lower().strip()
+                    description = pieza.get("description", "").lower().strip()
+                    gm_no = pieza.get("gmNo", "").lower().strip()
+                    gm_opel_no = pieza.get("gmOpelNo", "").lower().strip()
+
                     # Obtener descripción del JSON source si existe
                     json_desc = ""
-                    if pieza.get('json_source') and pieza['json_source']:
-                        json_desc = pieza['json_source'].get('description', '').lower().strip()
-                    
+                    if pieza.get("json_source") and pieza["json_source"]:
+                        json_desc = (
+                            pieza["json_source"].get("description", "").lower().strip()
+                        )
+
                     # CRITERIO 1: Coincidencia exacta del término completo en caption (prioridad máxima)
                     if termino_lower in caption:
                         return True
-                    
+
                     # CRITERIO 2: Coincidencia exacta del término completo en description
                     if termino_lower in description:
                         return True
-                    
+
                     # CRITERIO 3: Coincidencia exacta del término completo en json_desc
                     if json_desc and termino_lower in json_desc:
                         return True
-                    
+
                     # CRITERIO 4: Coincidencias parciales flexibles (para términos como "filtros")
                     # Dividir el término en palabras para búsqueda más granular
-                    palabras_busqueda = [palabra.strip() for palabra in termino_lower.split() if palabra.strip() and len(palabra.strip()) >= 3]
-                    
+                    palabras_busqueda = [
+                        palabra.strip()
+                        for palabra in termino_lower.split()
+                        if palabra.strip() and len(palabra.strip()) >= 3
+                    ]
+
                     if palabras_busqueda:
                         # Buscar cada palabra en caption (más flexible)
                         for palabra in palabras_busqueda:
                             if palabra in caption:
                                 return True
-                        
+
                         # Buscar cada palabra en description (con mayor longitud mínima)
                         for palabra in palabras_busqueda:
                             if len(palabra) >= 4 and palabra in description:
                                 return True
-                        
+
                         # Buscar cada palabra en json_desc
                         if json_desc:
                             for palabra in palabras_busqueda:
                                 if len(palabra) >= 4 and palabra in json_desc:
                                     return True
-                    
+
                     # CRITERIO 5: Coincidencias en números de parte (muy específicas)
                     if len(termino_lower) >= 4:
                         if termino_lower in gm_no or termino_lower in gm_opel_no:
                             return True
-                    
+
                     return False
-                
+
                 # Aplicar filtro de relevancia
-                resultados_filtrados = [pieza for pieza in resultados_finales if es_relevante(pieza, term)]
+                resultados_filtrados = [
+                    pieza for pieza in resultados_finales if es_relevante(pieza, term)
+                ]
                 estadisticas["piezas_filtradas"] = len(resultados_filtrados)
-                estadisticas["piezas_descartadas_por_filtro"] = len(resultados_finales) - len(resultados_filtrados)
-                
+                estadisticas["piezas_descartadas_por_filtro"] = len(
+                    resultados_finales
+                ) - len(resultados_filtrados)
+
                 resultados_finales = resultados_filtrados
                 estadisticas["piezas_finales"] = len(resultados_finales)
             else:
@@ -1749,7 +1821,7 @@ class OpelApi(PartsLink24API):
                 estadisticas["piezas_filtradas"] = len(resultados_finales)
                 estadisticas["piezas_descartadas_por_filtro"] = 0
                 estadisticas["piezas_finales"] = len(resultados_finales)
-            
+
             # 4. MOSTRAR ESTADÍSTICAS Y RESULTADOS
             # print(f"\n📊 ESTADÍSTICAS DE COMBINACIÓN:")
             # print(f"   • Resultados JSON iniciales: {estadisticas['total_json']}")
@@ -1763,26 +1835,26 @@ class OpelApi(PartsLink24API):
             # else:
             #     print(f"   • Filtro de relevancia: DESACTIVADO")
             # print(f"   • Piezas únicas finales: {estadisticas['piezas_finales']}")
-            
+
             # if resultados_finales:
             #     print(f"\n✅ PIEZAS ÚNICAS ENCONTRADAS:")
             #     for i, pieza in enumerate(resultados_finales, 1):  # Mostrar todos
             #         print(f"   {i}. gmNo: {pieza['gmNo']} | gmOpelNo: {pieza['gmOpelNo']} | {pieza['caption'][:50]}...")
-            
+
             return {
                 "piezas_unicas": resultados_finales,
                 "estadisticas": estadisticas,
                 "resultados_json_originales": resultados_json,
-                "total_piezas": len(resultados_finales)
+                "total_piezas": len(resultados_finales),
             }
-            
+
         except Exception as e:
             print(f"❌ Error en buscar_y_consultar_imagenes: {e}")
             return {
                 "piezas_unicas": [],
                 "estadisticas": {"error": str(e)},
                 "resultados_json_originales": [],
-                "total_piezas": 0
+                "total_piezas": 0,
             }
 
 
@@ -3286,6 +3358,7 @@ class KiaApi(PartsLink24API):
         self.consulta_url = brand_info.get("consulta_url")
         self.producto_url = brand_info.get("producto_url")
         self.data_url = brand_info.get("datos_url")
+        self.partes_url = brand_info.get("partes_url")
 
     def buscar_pieza(
         self,
@@ -3334,7 +3407,7 @@ class KiaApi(PartsLink24API):
         if response is not None and (
             response.status_code == 401 or response.status_code == 402
         ):
-            refrescar = self.refresh_access_token(service_name, is_refresh=True)
+            refrescar = self.refresh_access_token()
             if refrescar:
                 self.save_session_state()
                 self.load_session_state()
@@ -3365,7 +3438,7 @@ class KiaApi(PartsLink24API):
                 os.remove(self.session_file)
             logged = self.login()
             if logged:
-                ok = self.refresh_access_token(service_name, is_refresh=False)
+                ok = self.refresh_access_token()
                 if ok:
                     self.save_session_state()
                     self.load_session_state()
@@ -3395,19 +3468,23 @@ class KiaApi(PartsLink24API):
             )
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
+
+        # print(response_data)
         items = response_data.get("items", [])
         if not items:
             print(f"No se encontraron resultados para '{query}' (VIN {vin}).")
             return []
 
         results = []
-        for item in items[:50]:
+        for item in items:
+
+            valid = item.get("valid", False)
+            if not valid:
+                continue
+
             item_url = item.get("url", "")
-            full_url = (
-                "https://www.partslink24.com/hyundai-kia-automotive-group/kia_parts/"
-                + item_url
-            )
-            parsed = urlparse(full_url)
+
+            parsed = urlparse(item_url)
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
             headers = self.headers.copy()
@@ -3415,52 +3492,75 @@ class KiaApi(PartsLink24API):
                 headers["Authorization"] = f"Bearer {self.access_token}"
 
             try:
-                detail_resp = self.session.get(
+                response_html = self.session.get(
                     product_url, headers=headers, params=params
                 )
-                details = (
-                    detail_resp.json()
-                    if detail_resp.status_code == 200
-                    and "application/json"
-                    in detail_resp.headers.get("Content-Type", "")
-                    else None
-                )
-            except Exception:
-                details = None
 
-            results.append(
-                {
-                    "caption": item.get("caption"),
-                    "partno": item.get("partno"),
-                    "pnc": item.get("pnc"),
-                    "url": item_url,
-                    "details": details,
-                }
-            )
+                soup = BeautifulSoup(response_html.text, "html.parser")
+                regex_pattern = re.compile(r"^_nav-bom-table\d+$")
+                filas_despiece = soup.find_all("tr", id=regex_pattern)
+                for fila in filas_despiece[:15]:
+                    parts = {}
+                    fila_soup = BeautifulSoup(str(fila), "html.parser")
+                    row = fila_soup.find("tr", class_="tc-row tc-data-row")
+                    name_row = fila_soup.find("td", class_="text tc-rcell")
+                    if row:
+                        json_url = row.get("jsonurl", "")
+
+                        parsed_json_url = urlparse(json_url)
+                        json_params = {
+                            k: v[0] for k, v in parse_qs(parsed_json_url.query).items()
+                        }
+
+                        json_response = self.session.get(
+                            url=self.partes_url, headers=headers, params=json_params
+                        )
+
+                        detail = json_response.json().get("details", [])
+                        # print(detail)
+                        if not detail:
+                            continue
+
+                        cat_no = detail[0].get("catNo", "")
+                        partno = detail[0].get("partno", "")
+                        valid = detail[0].get("valid", False)
+
+                        parts["name"] = name_row.text.strip() if name_row else ""
+                        parts["catNo"] = cat_no
+                        parts["partno"] = partno
+                        parts["valid"] = valid
+
+                        results.append(parts)
+
+            except Exception as e:
+                print(f"Error: {e}")
+        print(results)
+        return results
 
         # Formateo en tabla legible
-        def trunc(s, n):
-            s = s or ""
-            return (s[: n - 1] + "…") if len(s) > n else s
 
-        print("\n" + "=" * 100)
-        print(
-            f"RESULTADOS KIA — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
-        )
-        print("=" * 100)
-        header = f"{'PARTNO':<18} {'PNC':<12} {'DESCRIPCIÓN':<40} {'URL':<25}"
-        print(header)
-        print("-" * 100)
-        for r in results:
-            print(
-                f"{trunc(r.get('partno',''),18):<18} "
-                f"{trunc(r.get('pnc',''),12):<12} "
-                f"{trunc(r.get('caption',''),40):<40} "
-                f"{trunc(r.get('url',''),25):<25}"
-            )
-        print("=" * 100)
+    # def trunc(s, n):
+    #     s = s or ""
+    #     return (s[: n - 1] + "…") if len(s) > n else s
 
-        return results
+    # print("\n" + "=" * 100)
+    # print(
+    #     f"RESULTADOS KIA — VIN {vin} — Búsqueda: {query} — {len(results)} elemento(s)"
+    # )
+    # print("=" * 100)
+    # header = f"{'PARTNO':<18} {'PNC':<12} {'DESCRIPCIÓN':<40} {'URL':<25}"
+    # print(header)
+    # print("-" * 100)
+    # for r in results:
+    #     print(
+    #         f"{trunc(r.get('partno',''),18):<18} "
+    #         f"{trunc(r.get('pnc',''),12):<12} "
+    #         f"{trunc(r.get('caption',''),40):<40} "
+    #         f"{trunc(r.get('url',''),25):<25}"
+    #     )
+    # print("=" * 100)
+
+    # return results
 
 
 def test(vin: str, brand: str, query: str, car: Optional[str] = None):
@@ -3476,7 +3576,7 @@ def test(vin: str, brand: str, query: str, car: Optional[str] = None):
     elif brand.upper() == "OPEL":
         # Para OPEL usamos funcionalidad avanzada con extracción de imágenes
         opel_api = OpelApi(ACCOUNT, USER, PASSWORD)
-        
+
         print("Cargando estado de sesion anterior...")
         is_ready = opel_api.load_session_state()
 
@@ -3501,33 +3601,37 @@ def test(vin: str, brand: str, query: str, car: Optional[str] = None):
         print(f"\n🔍 Búsqueda con extracción de imágenes para: '{query}'")
         try:
             # Usar la funcionalidad avanzada que incluye extracción de imágenes
-            resultados = opel_api.buscar_y_consultar_imagenes(vin, query, aplicar_filtro=False)
-            
+            resultados = opel_api.buscar_y_consultar_imagenes(
+                vin, query, aplicar_filtro=False
+            )
+
             if resultados and resultados.get("piezas_unicas"):
                 piezas_unicas = resultados.get("piezas_unicas", [])
-                
+
                 # Función para limpiar caption (eliminar texto después de <br>)
                 def limpiar_caption(caption):
-                    if caption and '<br>' in caption:
-                        return caption.split('<br>')[0].strip()
+                    if caption and "<br>" in caption:
+                        return caption.split("<br>")[0].strip()
                     return caption or ""
-                
+
                 # Imprimir solo las piezas únicas
                 print(f"\n📦 Piezas únicas encontradas ({len(piezas_unicas)}):")
                 print("-" * 80)
-                
+
                 for pieza in piezas_unicas:
-                    caption_limpio = limpiar_caption(pieza.get('caption', ''))
-                    print(f"• {pieza.get('gmNo', 'N/A')} | {pieza.get('gmOpelNo', 'N/A')} | {caption_limpio}")
-                    if pieza.get('url'):
+                    caption_limpio = limpiar_caption(pieza.get("caption", ""))
+                    print(
+                        f"• {pieza.get('gmNo', 'N/A')} | {pieza.get('gmOpelNo', 'N/A')} | {caption_limpio}"
+                    )
+                    if pieza.get("url"):
                         print(f"  🔗 {pieza['url']}")
-                
+
             else:
                 print("❌ No se obtuvieron resultados")
-                
+
         except Exception as e:
             print(f"❌ Error en la búsqueda avanzada: {e}")
-            
+
         return  # Salir aquí para OPEL, no continuar con el flujo estándar
     elif brand.upper() == "NISSAN":
         session_manager = NissanApi(ACCOUNT, USER, PASSWORD)
@@ -3592,7 +3696,7 @@ if __name__ == "__main__":
 
     if num_args < 4 or num_args > 5:
         print(
-            "Error: Se requieren 3 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta' 'golf'"
+            "Error: Se requieren 4 argumentos: VIN, Marca y Pieza. Ejemplo: python partslink.py WVWZZZ1KZ4B024648 'vw' 'cerradura de puerta' 'golf'"
         )
         sys.exit(1)
     vin = sys.argv[1]
@@ -3608,9 +3712,10 @@ if __name__ == "__main__":
     # vin = "WME4513311K043393"
     # pieza = "Espejos retrovisores"
 
-    #marca = "ford"
-    #vin = "WF0JXXWPCJFM36230"
-    #pieza = "Válvula/Recirculación Gases Escape"
+    # marca = "ford"
+    # vin = "WF0JXXWPCJFM36230"
+    # pieza = "Válvula/Recirculación Gases Escape"
+    # car = "focus"
 
     # marca = "nissan"
     # vin = "SJNFDAE11U1245311"
@@ -3618,7 +3723,8 @@ if __name__ == "__main__":
 
     # marca = "kia"
     # vin = "KNEUP751256716941"
-    # pieza = "puerta"
+    # pieza = "cerradura de puerta"
+    # car = None
 
     # marca = "peugeot"
     # vin = "VF30U9HD8DS031095"
@@ -3646,10 +3752,10 @@ if __name__ == "__main__":
     # vin = "KMHST81UADU066300"
     # pieza = "puerta"          # term
 
-    marca = "OPEL"
-    vin = "W0LMRF4SEEB062229"
-    pieza = "filtros "
-
+    # marca = "OPEL"
+    # vin = "W0LMRF4SEEB062229"
+    # pieza = "filtros"
+    # car = "astra"
     # vin = "JTEBZ29J100180316"
     # marca = "toyota"
     # pieza = "cerradura de puerta"
@@ -3657,6 +3763,7 @@ if __name__ == "__main__":
     # marca = "VW"
     # pieza = "Medidor de aire"
     # vin = "WVWZZZ1KZ4B024648"
+    # car = None
 
     # marca = "mitubishi"
     # vin = "4MBMND32ATE001965"
@@ -3686,4 +3793,4 @@ if __name__ == "__main__":
         )
     else:
 
-        test(vin, marca, pieza, car)
+        test(vin, marca, pieza, car) if car else test(vin, marca, pieza)
