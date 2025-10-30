@@ -1910,14 +1910,14 @@ class MitsubishiApi(PartsLink24API):
             # Procesar cada record de la página actual
             for i, record in enumerate(records):
                 try:
-                    # Extraer datos correctamente de la estructura de respuesta
+                     # Extraer datos correctamente de la estructura de respuesta
                     values = record.get("values", {})
                     record_context = record.get("recordContext", {})
                     
                     part_info = {
                         "partno": values.get("partno", "N/A"),
                         "pnc": record_context.get("pnc", "N/A"),
-                        "description": values.get("partDescription", "N/A"),
+                        "description": record.get("description", "N/A"),
                         "partDescription": values.get("partDescription", "N/A"),
                         "page": page_count,
                         "position": i + 1
@@ -1981,16 +1981,12 @@ class MitsubishiApi(PartsLink24API):
         # Imprimir todo el contenido de all_parts al final
         print("=== TODAS LAS PIEZAS ENCONTRADAS ===")
         for part in all_parts:
-            print(f"Página {part['page']}, Posición {part['position']}: {part['partno']} - ID: {part.get('id', 'N/A')} - {part['description']}")
+            print(f" PNC: {part['pnc']} - PartNo: {part['partno']} - {part['description']} / {part['partDescription']}")
         print(f"=== TOTAL: {len(all_parts)} piezas en {page_count} páginas ===")
         
         # Retornar resumen de resultados
         return {
-            "total_parts": len(all_parts),
-            "total_pages": page_count,
-            "query": query,
-            "vin": vin,
-            "parts": all_parts
+            "Piezas":all_parts
         }
 
 
