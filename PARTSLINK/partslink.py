@@ -573,6 +573,12 @@ class PartsLink24API:
                 params["page"] = "0"
             elif service_name == "kia_parts":
                 params["term"] = params.pop("q")
+            elif service_name == "mmc_parts":
+                # Configuración específica para MITSUBISHI
+                params["modelId"] = "D32A"  # Este valor puede necesitar ser dinámico según el VIN
+                params["upds"] = "SYSPROPS_UPDS"
+                params["vehicle"] = "C608M409D"  # Este valor puede necesitar ser dinámico según el VIN
+                params["_"] = str(int(time.time() * 1000))
             elif service_name == "opel_parts":
                 # Configuración específica para OPEL: json-vin-search.action
                 params = {
@@ -1846,59 +1852,146 @@ class MitsubishiApi(PartsLink24API):
         # return None
 
     def procesar_resultados(self, response_data, service_name, vin, product_url, query):
-        print(response_data)
+        print(f"Procesando resultados para: {query}")
+        
+        # Manejar autenticación si está en modo demo
         demo = response_data.get("demo")
         if demo:
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
 
-            logged = self.login(ALL_SERVICES)
+            logged = self.login()
             if logged:
                 self.save_session_state()
                 self.load_session_state()
-                self.refresh_access_token(ALL_SERVICES, is_refresh=True)
+                self.refresh_access_token(self.service_name, is_refresh=True)
 
                 response = self._realizar_consulta(
                     vin, query, service_name, self.consulta_url
                 )
                 response_data = response.json()
+                print("Re-autenticación completada")
+            else:
+                print("Error: No se pudo re-autenticar")
+                return []
+                
+        """ #car_data = self.obtener_datos_coche(vin, service_name, self.datos_url)
+                        #print(response.json())
 
-                car_data = self.obtener_datos_coche(vin, service_name, self.datos_url)
-                print(response.json())
+                records = response_data.get("data", {}).get("records", [])
 
-        records = response_data.json().get("data", {}).get("records", [])
+                for record in records:
+                    # Usar directamente el path completo en lugar de separar en parámetros individuales
+                    path_info = record.get("p5goto", {}).get("ws", [])[0].get("path")
+                    
+                    # Construir la URL completa usando el path directamente
+                    full_url = f"https://www.partslink24.com{path_info}"
+                    
+                    consulta_headers = self.headers.copy()
+                    consulta_headers.update({"Authorization": f"Bearer {self.access_token}"})
+                    consulta_producto = self.session.get(
+                        full_url, headers=consulta_headers
+                    )
+                    print(consulta_producto.url)
+                    print(f"Path usado: {path_info}")
 
-        for record in records:
-            path_info = record.get("p5goto", {}).get("ws", [])[0].get("path")
-            parsed_url = urlparse(path_info)
-            query_params = parse_qs(parsed_url.query)
-            bomDetails = query_params.get("bomDetails", [None])[0]
-            maingroup = query_params.get("mainGroup", [None])[0]
-            subgroup = query_params.get("subGroup", [None])[0]
-            upds = query_params.get("upds", [None])[0]
-            modelId = query_params.get("modelId", [None])[0]
-
-            params_producto = {
-                "bomDetails": bomDetails,
-                "lang": "es",
-                "maingroup": maingroup,
-                "modelId": "D32A",
-                "serviceName": service_name,
-                "subgroup": subgroup,
-                "upds": upds,
-                # "vehicle": "C608M409D",
-                "vin": vin,
-                # "_": str(int(time.time() * 1000)),  # Timestamp dinámico
-            }
-            consulta_headers = self.headers.copy()
-            consulta_headers.update({"Authorization": f"Bearer {self.access_token}"})
-            consulta_producto = self.session.get(
-                product_url, headers=consulta_headers, params=params_producto
-            )
-            print(consulta_producto.url)
-            print(query_params)
-
-        return None
+                return None"""
+        # Lista para almacenar todas las piezas encontradas
+        all_parts = []
+        current_response = response_data
+        page_count = 1
+        
+        # Procesar páginas hasta que no haya más nextPagePath o se alcance el límite de 6 páginas
+        while current_response and page_count <= 6:
+            # Extraer records de la página actual
+            data = current_response.get("data", {})
+            records = data.get("records", [])
+            
+            # Procesar cada record de la página actual
+            for i, record in enumerate(records):
+                try:
+                    # Extraer datos correctamente de la estructura de respuesta
+                    values = record.get("values", {})
+                    record_context = record.get("recordContext", {})
+                    
+                    part_info = {
+                        "partno": values.get("partno", "N/A"),
+                        "pnc": record_context.get("pnc", "N/A"),
+                        "description": values.get("partDescription", "N/A"),
+                        "partDescription": values.get("partDescription", "N/A"),
+                        "page": page_count,
+                        "position": i + 1
+                    }
+                    
+                    # Obtener path para detalles adicionales
+                    p5goto = record.get("p5goto", {})
+                    ws_list = p5goto.get("ws", [])
+                    
+                    if ws_list and len(ws_list) > 0:
+                        path_info = ws_list[0].get("path")
+                        if path_info:
+                            part_info["detail_url"] = f"https://www.partslink24.com{path_info}"
+                            part_info["id"] = ws_list[0].get('id', 'N/A')
+                            
+                            # Opcional: Obtener detalles adicionales de la pieza
+                            consulta_headers = self.headers.copy()
+                            consulta_headers.update({"Authorization": f"Bearer {self.access_token}"})
+                            
+                            try:
+                                consulta_producto = self.session.get(
+                                    part_info["detail_url"], headers=consulta_headers
+                                )
+                                if consulta_producto.status_code == 200:
+                                    part_info["detail_status"] = "OK"
+                                else:
+                                    part_info["detail_status"] = f"Error {consulta_producto.status_code}"
+                            except Exception as e:
+                                part_info["detail_status"] = f"Error: {str(e)}"
+                    
+                    all_parts.append(part_info)
+                    
+                except Exception as e:
+                    continue
+            
+            # Verificar si hay más páginas y no hemos alcanzado el límite
+            next_page_path = data.get("nextPagePath")
+            
+            if next_page_path and page_count < 6:
+                # Construir URL completa para la siguiente página
+                next_page_url = f"https://www.partslink24.com{next_page_path}"
+                
+                # Realizar consulta para la siguiente página
+                try:
+                    consulta_headers = self.headers.copy()
+                    consulta_headers.update({"Authorization": f"Bearer {self.access_token}"})
+                    
+                    next_response = self.session.get(next_page_url, headers=consulta_headers)
+                    
+                    if next_response.status_code == 200:
+                        current_response = next_response.json()
+                        page_count += 1
+                    else:
+                        break
+                        
+                except Exception as e:
+                    break
+            else:
+                break
+        
+        # Imprimir todo el contenido de all_parts al final
+        print("=== TODAS LAS PIEZAS ENCONTRADAS ===")
+        for part in all_parts:
+            print(f"Página {part['page']}, Posición {part['position']}: {part['partno']} - ID: {part.get('id', 'N/A')} - {part['description']}")
+        print(f"=== TOTAL: {len(all_parts)} piezas en {page_count} páginas ===")
+        
+        # Retornar resumen de resultados
+        return {
+            "total_parts": len(all_parts),
+            "total_pages": page_count,
+            "query": query,
+            "vin": vin,
+            "parts": all_parts
+        }
 
 
 # Error 402
@@ -3476,7 +3569,7 @@ def test(vin: str, brand: str, query: str, car: Optional[str] = None):
         return
     elif brand.upper() == "NISSAN":
         session_manager = NissanApi(ACCOUNT, USER, PASSWORD)
-    elif brand.upper() == "MITUBISHI":
+    elif brand.upper() == "MITSUBISHI":
         session_manager = MitsubishiApi(ACCOUNT, USER, PASSWORD)
     elif brand.upper() == "FORD":
         session_manager = FordAPI(ACCOUNT, USER, PASSWORD)
@@ -3527,7 +3620,7 @@ def test(vin: str, brand: str, query: str, car: Optional[str] = None):
         session_manager.service_name,
         session_manager.consulta_url,
         session_manager.producto_url,
-        session_manager.data_url,
+        session_manager.datos_url,
         car,
     )
 
@@ -3603,9 +3696,9 @@ if __name__ == "__main__":
     # pieza = "Medidor de aire"
     # vin = "WVWZZZ1KZ4B024648"
 
-    # marca = "mitubishi"
-    # vin = "4MBMND32ATE001965"
-    # pieza = "Kit de distribucion"
+    marca = "mitsubishi"
+    vin = "4MBMND32ATE001965"
+    pieza = "Filtros"
 
     # marca = "BMW"
     # vin = "WBAPP51040A792442"
