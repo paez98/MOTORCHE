@@ -3198,7 +3198,134 @@ class HyundaiApi(PartsLink24API):
         self.service_name = brand_info.get("service_name")
         self.consulta_url = brand_info.get("consulta_url")
         self.producto_url = brand_info.get("producto_url")
-        self.data_url = brand_info.get("datos_url")
+        self.data_url = brand_info.get("data_url")
+
+    def buscar_pieza(
+        self,
+        vin: str,
+        term: str,
+        service_name: str,
+        search_url: Optional[str] = None,
+        product_url: Optional[str] = None,
+        data_url: Optional[str] = None,
+        page: Optional[str] = None,
+        car: Optional[str] = None,
+    ):
+        all_results = []
+        page = 0
+        max_pages = 10  # Límite de páginas para evitar bucles infinitos
+        
+        while page < max_pages:
+            params = {
+                "lang": "es",
+                "serviceName": service_name,
+                "vin": vin,
+                "term": term,
+                "page": str(page),
+            }
+
+            headers = self.headers.copy()
+            if self.access_token:
+                headers["Authorization"] = f"Bearer {self.access_token}"
+
+            response = self.session.get(
+                url=search_url or self.consulta_url,
+                headers=headers,
+                params=params,
+            )
+
+            # Manejar errores de autenticación
+            if response.status_code in [401, 402]:
+                if page == 0:  # Solo intentar reautenticación en la primera página
+                    refrescar = self.refresh_access_token(service_name, is_refresh=True)
+                    if refrescar:
+                        self.save_session_state()
+                        self.load_session_state()
+                        headers = self.headers.copy()
+                        headers["Authorization"] = f"Bearer {self.access_token}"
+                        response = self.session.get(
+                            url=search_url or self.consulta_url,
+                            headers=headers,
+                            params=params,
+                        )
+                    
+                    if response.status_code in [401, 402]:
+                        if os.path.exists(self.session_file):
+                            os.remove(self.session_file)
+                        logged = self.login()
+                        if logged:
+                            ok = self.refresh_access_token(service_name, is_refresh=False)
+                            if ok:
+                                self.save_session_state()
+                                self.load_session_state()
+                                headers = self.headers.copy()
+                                headers["Authorization"] = f"Bearer {self.access_token}"
+                                response = self.session.get(
+                                    url=search_url or self.consulta_url,
+                                    headers=headers,
+                                    params=params,
+                                )
+                
+                if response.status_code in [401, 402]:
+                    print(f"Suscripción requerida para Hyundai. Verifica permisos de 'hyundai_parts' en tu cuenta.")
+                    break
+
+            # Verificar si la respuesta es válida
+            if response.status_code != 200 or "application/json" not in response.headers.get("Content-Type", ""):
+                break
+
+            # Procesar resultados de esta página
+            page_results = self.procesar_resultados(
+                response.json(),
+                service_name,
+                vin,
+                product_url or self.producto_url,
+                term,
+            )
+            
+            if not page_results:
+                break  # No hay más resultados
+            
+            all_results.extend(page_results)
+            page += 1
+        
+        # Mostrar resultados finales consolidados
+        if all_results:
+            print("\n" + "="*80)
+            print(f"RESULTADOS HYUNDAI — VIN {vin} — Búsqueda: {term} — {len(all_results)} elemento(s)")
+            print(f"Información básica: {len(all_results)} | Páginas procesadas: {page}")
+            print("="*80)
+            print(f"{'PARTNO':<18} {'PNC':<5} {'DESCRIPCIÓN':<55}")
+            print("-"*80)
+            
+            for result in all_results:
+                partno = result.get('partno', '')[:17]
+                pnc = result.get('pnc', '')[:4]
+                caption = result.get('caption', '')[:54]
+                
+                print(f"{partno:<18} {pnc:<5} {caption:<55}")
+            
+            print("="*80)
+        
+        return all_results
+
+    def procesar_resultados(self, response_data, service_name, vin, product_url, query):
+        items = response_data.get("items", [])
+        if not items:
+            return []
+
+        results = []
+        for item in items:
+            resultado = {
+                'partno': item.get('partno', ''),
+                'pnc': item.get('pnc', ''),
+                'caption': item.get('caption', ''),
+                'url': item.get('url', '')
+            }
+            results.append(resultado)
+
+        return results
+
 
     def buscar_pieza(
         self,
@@ -3334,7 +3461,7 @@ class KiaApi(PartsLink24API):
         self.service_name = brand_info.get("service_name")
         self.consulta_url = brand_info.get("consulta_url")
         self.producto_url = brand_info.get("producto_url")
-        self.data_url = brand_info.get("datos_url")
+        self.data_url = brand_info.get("data_url")
 
     def buscar_pieza(
         self,
